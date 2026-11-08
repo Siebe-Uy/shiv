@@ -1,0 +1,9 @@
+[package]
+name = "shiv-api"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0"
+
+[lib]
+name = "shiv_api"
+path = "src/lib.rs"

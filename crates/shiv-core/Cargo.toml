@@ -1,0 +1,9 @@
+[package]
+name = "shiv-core"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0"
+
+[lib]
+name = "shiv_core"
+path = "src/lib.rs"
