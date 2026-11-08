@@ -89,3 +89,16 @@ fn rejects_mod_id_with_path_separators() {
     }
     assert!(!d.path().join(".shiv").exists());
 }
+
+#[test]
+fn group_does_not_show_chunks_as_mods() {
+    let d = tempdir().unwrap();
+    fs::write(d.path().join("pak01_dir.vpk"), b"x").unwrap();
+    fs::write(d.path().join("pak01_000.vpk"), b"x").unwrap();
+    fs::write(d.path().join("pak01_001.vpk"), b"x").unwrap();
+    sidecar::write(d.path(), &sc("m1", &["pak01_dir.vpk"])).unwrap();
+    let g = sidecar::group(d.path());
+    assert_eq!(g.len(), 1);
+    assert_eq!(g[0].sidecar.as_ref().unwrap().mod_id, "m1");
+    assert_eq!(g[0].vpks[0].chunks.len(), 2);
+}

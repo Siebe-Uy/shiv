@@ -134,6 +134,7 @@ fn set_enabled_reports_target_exists() {
         file: dir.path().join("pak01_dir.vpk"),
         pak: Some(1),
         enabled: true,
+        chunks: vec![],
     };
     assert!(matches!(
         addons::set_enabled(&v, false),
@@ -150,8 +151,97 @@ fn set_enabled_with_stale_flag_still_correct() {
         file: dir.path().join("pak01_dir.vpk"),
         pak: Some(1),
         enabled: true,
+        chunks: vec![],
     };
     addons::set_enabled(&stale, true).unwrap();
     assert!(dir.path().join("pak01_dir.vpk").exists());
     assert!(!dir.path().join("pak01_dir.vpk.disabled").exists());
+}
+
+#[test]
+fn list_folds_chunks_into_dir_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    touch(dir.path(), "pak01_dir.vpk");
+    touch(dir.path(), "pak01_000.vpk");
+    touch(dir.path(), "pak01_001.vpk.disabled");
+    touch(dir.path(), "pak02_dir.vpk");
+    let list = addons::list(dir.path()).unwrap();
+    assert_eq!(list.len(), 2);
+    assert_eq!(list[0].pak, Some(1));
+    assert_eq!(
+        list[0].chunks,
+        vec![
+            dir.path().join("pak01_000.vpk"),
+            dir.path().join("pak01_001.vpk.disabled")
+        ]
+    );
+    assert!(list[1].chunks.is_empty());
+}
+
+#[test]
+fn list_keeps_orphan_chunk_as_unknown() {
+    let dir = tempfile::tempdir().unwrap();
+    touch(dir.path(), "pak05_000.vpk");
+    let list = addons::list(dir.path()).unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].pak, None);
+    assert_eq!(list[0].file, dir.path().join("pak05_000.vpk"));
+}
+
+#[test]
+fn set_enabled_moves_chunks_together() {
+    let dir = tempfile::tempdir().unwrap();
+    touch(dir.path(), "pak01_dir.vpk");
+    touch(dir.path(), "pak01_000.vpk");
+    touch(dir.path(), "pak01_001.vpk");
+    touch(dir.path(), "pak02_000.vpk");
+    addons::set_enabled(&only_pak(dir.path(), 1), false).unwrap();
+    for n in ["pak01_dir.vpk", "pak01_000.vpk", "pak01_001.vpk"] {
+        assert!(dir.path().join(format!("{n}.disabled")).exists(), "{n}");
+        assert!(!dir.path().join(n).exists(), "{n}");
+    }
+    assert!(dir.path().join("pak02_000.vpk").exists());
+    addons::set_enabled(&only_pak(dir.path(), 1), true).unwrap();
+    assert!(dir.path().join("pak01_001.vpk").exists());
+    assert!(!dir.path().join("pak01_001.vpk.disabled").exists());
+}
+
+fn only_pak(dir: &Path, n: u32) -> addons::InstalledVpk {
+    addons::list(dir)
+        .unwrap()
+        .into_iter()
+        .find(|v| v.pak == Some(n))
+        .unwrap()
+}
+
+#[test]
+fn set_enabled_rolls_back_when_a_chunk_target_exists() {
+    let dir = tempfile::tempdir().unwrap();
+    touch(dir.path(), "pak01_dir.vpk");
+    touch(dir.path(), "pak01_000.vpk");
+    touch(dir.path(), "pak01_001.vpk");
+    touch(dir.path(), "pak01_001.vpk.disabled");
+    let v = only_pak(dir.path(), 1);
+    assert!(matches!(
+        addons::set_enabled(&v, false),
+        Err(AddonsError::TargetExists { .. })
+    ));
+    for n in [
+        "pak01_dir.vpk",
+        "pak01_000.vpk",
+        "pak01_001.vpk",
+        "pak01_001.vpk.disabled",
+    ] {
+        assert!(dir.path().join(n).exists(), "{n}");
+    }
+    assert!(!dir.path().join("pak01_dir.vpk.disabled").exists());
+    assert!(!dir.path().join("pak01_000.vpk.disabled").exists());
+}
+
+#[test]
+fn next_pak_counts_chunk_numbers() {
+    let dir = tempfile::tempdir().unwrap();
+    touch(dir.path(), "pak01_000.vpk");
+    touch(dir.path(), "pak02_003.vpk.disabled");
+    assert_eq!(addons::next_pak(dir.path()).unwrap(), 3);
 }

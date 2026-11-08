@@ -106,7 +106,7 @@ fn installs_zip_with_one_vpk() {
 }
 
 #[test]
-fn installs_multi_vpk_with_consecutive_paks() {
+fn installs_multi_vpk_with_lowest_free_paks() {
     let e = env();
     fs::write(e.paths.addons.join("pak01_dir.vpk"), b"other").unwrap();
     let a = zip_in(
@@ -398,6 +398,13 @@ fn rar_crc16(bytes: &[u8]) -> u16 {
 
 /// Hand-built RAR 4.x archive holding stored (method 0x30) files.
 fn rar4_stored(files: &[(&str, &[u8])]) -> Vec<u8> {
+    let entries: Vec<(&str, &[u8], u8, u32)> =
+        files.iter().map(|(n, d)| (*n, *d, 3, 0o100644)).collect();
+    rar4_entries(&entries)
+}
+
+/// `(name, data, host_os, attrs)` entries.
+fn rar4_entries(files: &[(&str, &[u8], u8, u32)]) -> Vec<u8> {
     let mut out = b"Rar!\x1a\x07\x00".to_vec();
     // Main header.
     let mut main = vec![0x73, 0, 0, 13, 0, 0, 0, 0, 0, 0, 0];
@@ -405,19 +412,19 @@ fn rar4_stored(files: &[(&str, &[u8])]) -> Vec<u8> {
     let mut hdr = crc.to_le_bytes().to_vec();
     hdr.append(&mut main);
     out.extend(hdr);
-    for (name, data) in files {
+    for (name, data, host, attr) in files {
         let mut h = vec![0x74];
         h.extend(0x8000u16.to_le_bytes()); // flags: ADD_SIZE present
         h.extend((32 + name.len() as u16).to_le_bytes());
         h.extend((data.len() as u32).to_le_bytes()); // packed
         h.extend((data.len() as u32).to_le_bytes()); // unpacked
-        h.push(3); // host OS: unix
+        h.push(*host);
         h.extend(crc32fast::hash(data).to_le_bytes());
         h.extend(0x5A21_0000u32.to_le_bytes()); // dos time
         h.push(20); // unpack version
         h.push(0x30); // stored
         h.extend((name.len() as u16).to_le_bytes());
-        h.extend(0o100644u32.to_le_bytes()); // attrs
+        h.extend(attr.to_le_bytes());
         h.extend(name.as_bytes());
         out.extend(rar_crc16(&h).to_le_bytes());
         out.extend(h);
@@ -476,4 +483,136 @@ fn size_cap_is_enforced() {
         install::install_with_limits(&many, meta("m1"), &e.paths, not_running, few).unwrap_err();
     assert!(matches!(err, InstallError::TooLarge), "{err:?}");
     assert_eq!(snapshot(&e.paths.addons), before);
+}
+
+#[test]
+fn multi_vpk_fills_gaps_in_pak_numbers() {
+    let e = env();
+    fs::write(e.paths.addons.join("pak02_dir.vpk"), b"o").unwrap();
+    fs::write(e.paths.addons.join("pak04_dir.vpk.disabled"), b"o").unwrap();
+    let a = zip_in(&e, &[("a.vpk", b"A"), ("b.vpk", b"B"), ("c.vpk", b"C")]);
+    let sc = run(&e, &a, "m1").unwrap();
+    assert_eq!(
+        sc.vpks,
+        vec!["pak01_dir.vpk", "pak03_dir.vpk", "pak05_dir.vpk"]
+    );
+}
+
+#[test]
+fn rar_rejects_symlink_and_reparse_attrs() {
+    for (host, attr) in [(3u8, 0o120777u32), (2u8, 0x20 | 0x400)] {
+        let e = env();
+        let p = e.work.join("l.rar");
+        fs::write(
+            &p,
+            rar4_entries(&[
+                ("ok.vpk", b"x", 3, 0o100644),
+                ("l.vpk", b"/etc/passwd", host, attr),
+            ]),
+        )
+        .unwrap();
+        let err = run(&e, &p, "m1").unwrap_err();
+        assert!(
+            matches!(err, InstallError::UnsafePath(_)),
+            "{attr:o}: {err:?}"
+        );
+        assert!(names(&e.paths.addons).is_empty());
+    }
+}
+
+#[test]
+fn uninstall_refuses_while_game_running() {
+    let e = env();
+    let a = zip_in(&e, &[("skin.vpk", b"x")]);
+    run(&e, &a, "m1").unwrap();
+    let m = sidecar::group(&e.paths.addons).remove(0);
+    let before = snapshot(&e.paths.addons);
+    let err = install::uninstall_with(&m, || true).unwrap_err();
+    assert!(matches!(err, InstallError::GameRunning), "{err:?}");
+    assert_eq!(snapshot(&e.paths.addons), before);
+    install::uninstall_with(&m, not_running).unwrap();
+}
+
+#[test]
+fn uninstall_unknown_vpk_removes_its_chunks() {
+    let e = env();
+    let d = &e.paths.addons;
+    fs::write(d.join("pak03_dir.vpk"), b"x").unwrap();
+    fs::write(d.join("pak03_000.vpk"), b"x").unwrap();
+    fs::write(d.join("pak03_001.vpk"), b"x").unwrap();
+    fs::write(d.join("pak04_000.vpk"), b"x").unwrap();
+    let m = sidecar::group(d)
+        .into_iter()
+        .find(|m| m.vpks[0].pak == Some(3))
+        .unwrap();
+    assert!(m.sidecar.is_none());
+    install::uninstall_with(&m, not_running).unwrap();
+    assert_eq!(names(d), vec!["pak04_000.vpk"]);
+}
+
+#[test]
+fn sidecar_with_traversal_vpk_name_deletes_nothing_outside_addons() {
+    let e = env();
+    let victim = e.paths.addons.parent().unwrap().join("victim.vpk");
+    fs::write(&victim, b"precious").unwrap();
+    let abs = e.work.join("abs_victim.vpk");
+    fs::write(&abs, b"precious").unwrap();
+    let evil = Sidecar {
+        mod_id: "m1".into(),
+        name: "x".into(),
+        version: None,
+        thumbnail_url: None,
+        vpks: vec![
+            "pak01_dir.vpk".into(),
+            "../victim.vpk".into(),
+            abs.to_string_lossy().into_owned(),
+        ],
+    };
+    fs::write(e.paths.addons.join("pak01_dir.vpk"), b"x").unwrap();
+    sidecar::write(&e.paths.addons, &evil).unwrap();
+
+    // Reinstall must not touch the victims.
+    let a = zip_in(&e, &[("new.vpk", b"n")]);
+    run(&e, &a, "m1").unwrap();
+    assert!(victim.exists() && abs.exists());
+
+    // Uninstall with a crafted InstalledMod must not either.
+    let mut m = sidecar::group(&e.paths.addons).remove(0);
+    m.sidecar = Some(evil);
+    install::uninstall_with(&m, not_running).unwrap();
+    assert!(victim.exists() && abs.exists());
+}
+
+fn set_age(path: &Path, secs: u64) {
+    let t = std::time::SystemTime::now() - std::time::Duration::from_secs(secs);
+    fs::File::open(path).unwrap().set_modified(t).unwrap();
+}
+
+fn plant_staging(e: &Env, name: &str, age_secs: u64) -> PathBuf {
+    let d = e.paths.addons.join(".shiv/tmp").join(name);
+    fs::create_dir_all(&d).unwrap();
+    fs::write(d.join("junk.vpk"), b"x").unwrap();
+    set_age(&d, age_secs);
+    d
+}
+
+#[test]
+fn stale_staging_dirs_are_cleaned_up() {
+    let e = env();
+    let stale = plant_staging(&e, "99999-1-0", 2 * 3600);
+    let a = zip_in(&e, &[("skin.vpk", b"x")]);
+    run(&e, &a, "m1").unwrap();
+    assert!(!stale.exists());
+    assert!(!e.paths.addons.join(".shiv/tmp").exists());
+}
+
+#[test]
+fn fresh_foreign_staging_is_left_alone() {
+    let e = env();
+    let fresh = plant_staging(&e, "99999-1-0", 10);
+    let own_old = plant_staging(&e, &format!("{}-1-0", std::process::id()), 2 * 3600);
+    let a = zip_in(&e, &[("skin.vpk", b"x")]);
+    run(&e, &a, "m1").unwrap();
+    assert!(fresh.exists());
+    assert!(own_old.exists());
 }

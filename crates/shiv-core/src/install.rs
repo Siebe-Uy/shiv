@@ -11,9 +11,9 @@ use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::addons::{self, AddonsError};
+use crate::addons::{self, AddonsError, PakKind, parse_pak};
 use crate::game::{self, GamePaths};
 use crate::sidecar::{self, InstalledMod, Sidecar, SidecarError};
 
@@ -113,8 +113,9 @@ pub fn install_with_limits(
     if game_running() {
         return Err(InstallError::GameRunning);
     }
-    let format = detect_format(archive)?;
     let addons_dir = paths.addons.as_path();
+    clean_stale_staging(addons_dir);
+    let format = detect_format(archive)?;
 
     // Also validates the mod id before any file is written. A corrupt old sidecar
     // is treated as absent so it cannot block reinstalling forever.
@@ -173,10 +174,11 @@ pub fn install_with_limits(
     }
 
     // The new mod is complete and recorded; only now drop the files of the old one.
+    // Best effort: the new mod is fully installed, so leftovers must not fail the call.
     if let Some(old) = old {
         for name in &old.vpks {
             if !new_sidecar.vpks.contains(name) {
-                remove_pak_files(addons_dir, name)?;
+                let _ = remove_pak_files(addons_dir, name);
             }
         }
     }
@@ -186,9 +188,26 @@ pub fn install_with_limits(
 /// Remove all of a mod's VPK files (including disabled forms and chunk files when it
 /// has a sidecar) and its sidecar. A mod without a sidecar loses only its own VPK files.
 pub fn uninstall(m: &InstalledMod) -> Result<(), InstallError> {
+    uninstall_with(m, game::is_running)
+}
+
+/// [`uninstall`] with an injectable running-game check; refuses before touching anything.
+pub fn uninstall_with(
+    m: &InstalledMod,
+    game_running: impl Fn() -> bool,
+) -> Result<(), InstallError> {
+    if game_running() {
+        return Err(InstallError::GameRunning);
+    }
     let Some(sc) = &m.sidecar else {
         for vpk in &m.vpks {
-            remove_if_exists(&vpk.file)?;
+            let name = vpk.file.file_name().and_then(|n| n.to_str());
+            match (name, vpk.file.parent()) {
+                (Some(n), Some(dir)) => {
+                    remove_pak_files(dir, n.strip_suffix(DISABLED_EXT).unwrap_or(n))?;
+                }
+                _ => remove_if_exists(&vpk.file)?,
+            }
         }
         return Ok(());
     };
@@ -204,7 +223,13 @@ pub fn uninstall(m: &InstalledMod) -> Result<(), InstallError> {
     let Some(dir) = m.vpks.first().and_then(|v| v.file.parent()) else {
         return Ok(());
     };
-    let mut names: BTreeSet<String> = sc.vpks.iter().cloned().collect();
+    // Sidecar content is untrusted: only plain `*.vpk` names inside `dir` are acted on.
+    let mut names: BTreeSet<String> = sc
+        .vpks
+        .iter()
+        .filter(|n| is_plain_vpk_name(n))
+        .cloned()
+        .collect();
     for vpk in &m.vpks {
         if let Some(n) = vpk.file.file_name().and_then(|n| n.to_str()) {
             names.insert(n.strip_suffix(DISABLED_EXT).unwrap_or(n).to_owned());
@@ -227,6 +252,9 @@ fn remove_if_exists(path: &Path) -> Result<(), InstallError> {
 /// Remove `name` (enabled form), its `.disabled` form and, for `pakNN_dir.vpk`, the
 /// `pakNN_<digits>.vpk[.disabled]` chunk files next to it.
 fn remove_pak_files(dir: &Path, name: &str) -> Result<(), InstallError> {
+    if !is_plain_vpk_name(name) {
+        return Ok(());
+    }
     remove_if_exists(&dir.join(name))?;
     remove_if_exists(&dir.join(format!("{name}{DISABLED_EXT}")))?;
     if let Some((number, PakKind::Dir)) = parse_pak(name) {
@@ -250,32 +278,45 @@ fn remove_pak_files(dir: &Path, name: &str) -> Result<(), InstallError> {
     Ok(())
 }
 
+/// A single plain path component ending in `.vpk`: no separators, `..`, or absolute paths.
+fn is_plain_vpk_name(name: &str) -> bool {
+    let mut comps = Path::new(name).components();
+    matches!(
+        (comps.next(), comps.next()),
+        (Some(Component::Normal(c)), None) if c == name
+    ) && !name.contains('\\')
+        && name.ends_with(".vpk")
+}
+
+/// Remove staging dirs left by a crashed run: owned by another process and over an hour old.
+fn clean_stale_staging(addons_dir: &Path) {
+    const MAX_AGE: Duration = Duration::from_secs(3600);
+    let tmp_root = addons_dir.join(SHIV_DIR).join(TMP_DIR);
+    let Ok(entries) = fs::read_dir(&tmp_root) else {
+        return;
+    };
+    let me = std::process::id().to_string();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name.split('-').next() == Some(me.as_str()) {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        let old = meta
+            .modified()
+            .ok()
+            .and_then(|m| m.elapsed().ok())
+            .is_some_and(|age| age > MAX_AGE);
+        if meta.is_dir() && old {
+            let _ = fs::remove_dir_all(entry.path());
+        }
+    }
+    let _ = fs::remove_dir(&tmp_root);
+    let _ = fs::remove_dir(addons_dir.join(SHIV_DIR));
+}
+
 // ---- pak names ----
-
-#[derive(Debug, PartialEq, Eq)]
-enum PakKind {
-    Dir,
-    /// The digits of `pakNN_<digits>.vpk`, kept verbatim.
-    Chunk(String),
-}
-
-/// Parse `pakNN_dir.vpk` / `pakNN_<digits>.vpk` (case-insensitive).
-fn parse_pak(name: &str) -> Option<(u32, PakKind)> {
-    let lower = name.to_ascii_lowercase();
-    let rest = lower.strip_prefix("pak")?.strip_suffix(".vpk")?;
-    let (num, tail) = rest.split_once('_')?;
-    if num.len() != 2 || !num.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let number = num.parse().ok()?;
-    if tail == "dir" {
-        Some((number, PakKind::Dir))
-    } else if !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit()) {
-        Some((number, PakKind::Chunk(tail.to_owned())))
-    } else {
-        None
-    }
-}
 
 /// `count` lowest free pak numbers, ascending. A number is taken when any file in
 /// `addons` (dir, disabled or chunk) already carries it.
@@ -285,22 +326,7 @@ fn allocate_paks(addons_dir: &Path, count: usize) -> Result<Vec<u32>, InstallErr
         Err(AddonsError::Full { .. }) => return Err(InstallError::AddonsFull),
         Err(e) => return Err(e.into()),
     }
-    let mut used: BTreeSet<u32> = BTreeSet::new();
-    match fs::read_dir(addons_dir) {
-        Ok(entries) => {
-            for entry in entries {
-                let entry = entry.map_err(io_err(addons_dir))?;
-                if let Some(n) = entry.file_name().to_str() {
-                    let n = n.strip_suffix(DISABLED_EXT).unwrap_or(n);
-                    if let Some((num, _)) = parse_pak(n) {
-                        used.insert(num);
-                    }
-                }
-            }
-        }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(io_err(addons_dir)(e)),
-    }
+    let used: BTreeSet<u32> = addons::used_pak_numbers(addons_dir)?.into_iter().collect();
     let free: Vec<u32> = (1..=addons::PAK_CAPACITY)
         .filter(|n| !used.contains(n))
         .take(count)
@@ -625,7 +651,9 @@ fn extract_rar(
         let name = header.filename.to_string_lossy().into_owned();
         count_entry(&mut seen, limits)?;
         relative_entry_path(&name, header.is_directory())?;
-        if header.file_attr & S_IFMT == S_IFLNK {
+        // Windows hosts store attribute flags (no file-type bits); 0x400 is the reparse point.
+        let reparse = header.file_attr & S_IFMT == 0 && header.file_attr & 0x400 != 0;
+        if header.file_attr & S_IFMT == S_IFLNK || reparse {
             return Err(InstallError::UnsafePath(format!("symlink entry {name}")));
         }
         if header.is_file() && is_vpk_name(&name) {
@@ -641,12 +669,22 @@ fn extract_rar(
     while let Some(header) = open.read_header()? {
         let name = header.entry().filename.to_string_lossy().into_owned();
         open = if header.entry().is_file() && is_vpk_name(&name) {
-            budget.charge(header.entry().unpacked_size)?;
             let target = dest.join(relative_entry_path(&name, false)?);
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent).map_err(io_err(parent))?;
+                ensure_no_symlink_chain(dest, parent)?;
             }
-            header.extract_to(&target)?
+            let next = header.extract_to(&target)?;
+            // Header metadata is untrusted: check what the library really wrote.
+            let meta = fs::symlink_metadata(&target).map_err(io_err(&target))?;
+            if !meta.file_type().is_file() {
+                let _ = fs::remove_file(&target);
+                return Err(InstallError::UnsafePath(format!(
+                    "non-regular entry {name}"
+                )));
+            }
+            budget.charge(meta.len())?;
+            next
         } else {
             header.skip()?
         };
@@ -726,4 +764,25 @@ fn collect_vpks(root: &Path) -> Result<Vec<StagedVpk>, InstallError> {
         ))
     });
     Ok(dirs)
+}
+
+/// No existing directory between `root` (exclusive) and `dir` (inclusive) may be a symlink.
+fn ensure_no_symlink_chain(root: &Path, dir: &Path) -> Result<(), InstallError> {
+    let rel = dir.strip_prefix(root).unwrap_or(dir);
+    let mut cur = root.to_path_buf();
+    for c in rel.components() {
+        cur.push(c);
+        match fs::symlink_metadata(&cur) {
+            Ok(m) if m.file_type().is_symlink() => {
+                return Err(InstallError::UnsafePath(format!(
+                    "symlinked directory {}",
+                    cur.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(io_err(&cur)(e)),
+        }
+    }
+    Ok(())
 }
