@@ -2,5 +2,6 @@
 
 pub mod addons;
 pub mod game;
+pub mod install;
 mod platform;
 pub mod sidecar;
