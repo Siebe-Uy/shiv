@@ -1,0 +1,32 @@
+import { ListView } from "std-widgets.slint";
+
+export struct Row { title: string, subtitle: string, img: image }
+
+export component App inherits Window {
+    title: "spike";
+    preferred-width: 640px;
+    preferred-height: 800px;
+    in property <[Row]> rows;
+    in-out property <length> scroll-y;
+    // animation-tick() changes every rendered frame, which keeps the window redrawing
+    // continuously and gives a per-frame timestamp for all renderers.
+    property <duration> tick: animation-tick();
+    callback frame(duration);
+    changed tick => { root.frame(root.tick); }
+
+    ListView {
+        viewport-y: root.scroll-y;
+        for row in root.rows: Rectangle {
+            height: 150px;
+            HorizontalLayout {
+                padding: 7.5px; spacing: 12px;
+                Image { source: row.img; width: 240px; height: 135px; }
+                VerticalLayout {
+                    alignment: center;
+                    Text { text: row.title; font-size: 18px; }
+                    Text { text: row.subtitle; font-size: 13px; }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,4 @@
+Missing refresh mode in SLINT_DEBUG_PERFORMANCE. Please specify either refresh_full_speed or refresh_lazy
+rss_after_load_mb=30.0
+frames=10000 median_ms=1.00 p95_ms=1.01 p99_ms=1.02 max_ms=1.04 frac_under_16.7=1.000
+rss_after_scroll_mb=30.3 cpu_secs_total=11.35
