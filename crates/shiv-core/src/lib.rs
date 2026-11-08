@@ -3,3 +3,4 @@
 pub mod addons;
 pub mod game;
 mod platform;
+pub mod sidecar;
