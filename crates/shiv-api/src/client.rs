@@ -5,15 +5,17 @@ use std::time::Duration;
 
 use ureq::Agent;
 
-use crate::dto::{DownloadFile, DownloadsResponse, ModDto};
+use crate::dto::{DownloadFile, DownloadsResponse, ModDto, Row};
 use crate::error::ApiError;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
-/// ureq has no per-read timeout, only a limit on the whole body. API JSON is
-/// small, so it gets the 30 s read budget; file downloads get a generous total
-/// cap so a stalled connection still ends.
-const DOWNLOAD_BODY_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// Total time cap for one file download (6 hours). ureq has no per-read
+/// timeout, only a limit on the whole body, so the cap must outlast legitimate
+/// slow downloads of large mods. Trade-off: a stalled connection can hold a
+/// download for up to the cap; the UI is expected to offer cancel. API JSON
+/// calls keep the 30 s budget.
+const DOWNLOAD_BODY_TIMEOUT: Duration = Duration::from_secs(6 * 60 * 60);
 /// Upper bound for buffered JSON bodies (catalog is a few MB).
 const JSON_LIMIT: u64 = 64 * 1024 * 1024;
 
@@ -83,9 +85,17 @@ impl Client {
     }
 
     /// The whole catalog (`GET /v2/mods` takes no parameters). Use
-    /// [`crate::apply_query`] for search, sort and paging.
+    /// [`crate::apply_query`] for search, sort and paging. Rows that fail to
+    /// deserialize (missing id/remoteId/name, null in a required field) are skipped.
     pub fn list_mods(&self) -> Result<Vec<ModDto>, ApiError> {
-        self.get_json(&format!("{}/v2/mods", self.base))
+        let rows: Vec<Row> = self.get_json(&format!("{}/v2/mods", self.base))?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| match r {
+                Row::Ok(m) => Some(*m),
+                Row::Skip(_) => None,
+            })
+            .collect())
     }
 
     /// Download files for a mod, with URLs exactly as the API returns them

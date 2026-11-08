@@ -183,3 +183,35 @@ fn http_error_status_is_reported() {
         "{r:?}"
     );
 }
+
+#[test]
+fn list_mods_skips_rows_missing_remote_id() {
+    let url = stub(1, |_| {
+        json(
+            r#"[{"id":"a","remoteId":"1","name":"Good"},
+            {"id":"b","name":"No remote id"},
+            {"id":"c","remoteId":"3","name":"Null likes","likes":null},
+            {"id":"d","remoteId":"4","name":"Also good","likes":2}]"#,
+        )
+    });
+    let mods = Client::new(&url).list_mods().unwrap();
+    let names: Vec<&str> = mods.iter().map(|m| m.name.as_str()).collect();
+    assert_eq!(names, ["Good", "Also good"]);
+}
+
+#[test]
+fn list_mods_all_valid_unchanged() {
+    let url = stub(1, |_| {
+        json(
+            r#"[{"id":"a","remoteId":"1","name":"A","likes":1,"downloadCount":5},
+            {"id":"b","remoteId":"2","name":"B","description":null}]"#,
+        )
+    });
+    let mods = Client::new(&url).list_mods().unwrap();
+    assert_eq!(mods.len(), 2);
+    assert_eq!(
+        (mods[0].id.as_str(), mods[0].likes, mods[0].download_count),
+        ("a", 1, 5)
+    );
+    assert_eq!(mods[1].remote_id, "2");
+}
