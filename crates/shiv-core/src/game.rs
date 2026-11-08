@@ -48,13 +48,22 @@ fn find_in(steam: &SteamDir) -> Result<Option<PathBuf>, GameError> {
 
 /// Find Deadlock via steamlocate, falling back to well-known Steam directories.
 pub fn locate() -> Result<GamePaths, GameError> {
-    if let Ok(steam) = SteamDir::locate()
-        && let Some(root) = find_in(&steam)?
-    {
+    locate_with(
+        || find_in(&SteamDir::locate()?),
+        &platform::default_steam_dirs(),
+    )
+}
+
+/// `primary` errors or finding nothing both fall through to `fallback_dirs`.
+fn locate_with(
+    primary: impl FnOnce() -> Result<Option<PathBuf>, GameError>,
+    fallback_dirs: &[PathBuf],
+) -> Result<GamePaths, GameError> {
+    if let Ok(Some(root)) = primary() {
         return Ok(GamePaths::from_root(root));
     }
-    for dir in platform::default_steam_dirs() {
-        if let Some(root) = locate_in_steam_dir(&dir)? {
+    for dir in fallback_dirs {
+        if let Some(root) = locate_in_steam_dir(dir)? {
             return Ok(GamePaths::from_root(root));
         }
     }
@@ -96,6 +105,20 @@ mod tests {
             ["python3", "deadlock-mod-manager"].into_iter()
         ));
         assert!(!any_deadlock_process(std::iter::empty()));
+    }
+
+    #[test]
+    fn locate_falls_through_when_primary_errors() {
+        let err = locate_with(|| Err(GameError::NotFound), &[]);
+        assert!(matches!(err, Err(GameError::NotFound)));
+        let ok = locate_with(|| Ok(Some(PathBuf::from("/g/Deadlock"))), &[]).unwrap();
+        assert_eq!(ok.root, PathBuf::from("/g/Deadlock"));
+        // A missing fallback dir is skipped, not fatal.
+        let none = locate_with(
+            || Err(GameError::NotFound),
+            &[PathBuf::from("/nonexistent")],
+        );
+        assert!(matches!(none, Err(GameError::NotFound)));
     }
 
     #[test]
