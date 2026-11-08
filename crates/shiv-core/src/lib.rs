@@ -1,1 +1,5 @@
-//! Shiv core crate (placeholder).
+//! Shiv core: game location and the addons model.
+
+pub mod addons;
+pub mod game;
+mod platform;
