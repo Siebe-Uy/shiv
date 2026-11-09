@@ -1,0 +1,401 @@
+// Repair: checks installed mods against the current game build, previews what
+// a repair package would change, applies it (after a backup) and undoes it.
+
+import { ListView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Button, TextButton } from "widgets.slint";
+import { LoadState, CenteredMessage } from "browse.slint";
+
+// How a mod's verdict is coloured.
+export enum RepairTone { works, fixable, update, fixed, unchecked }
+
+export struct RepairRow {
+    id: string,
+    name: string,
+    // The mod's VPK files, e.g. "pak03_dir.vpk"; "" when the name already is the file.
+    files: string,
+    tone: RepairTone,
+    status: string,
+    summary: string,
+    // What a repair changes, one line each (capped, with an "and N more" line).
+    changes: [string],
+    // Problems no repair addresses, and the reason a mod could not be checked.
+    remaining: [string],
+    enabled: bool,
+}
+
+export global RepairState {
+    in property <[RepairRow]> rows;
+    in property <LoadState> load-state: LoadState.loading;
+    in property <string> error-text;
+    in property <string> summary;
+    // Mods with repairs available; also shown in the sidebar.
+    in property <int> fixable-count;
+    // The repair package no longer matches the installed mods or game.
+    in property <bool> stale;
+    in property <bool> game-running;
+    // A check is running on a worker thread (the list stays on screen).
+    in property <bool> scanning;
+    // An apply or undo is running on a worker thread.
+    in property <bool> busy;
+    in property <string> busy-text;
+    // Apply is possible (something to repair or an outdated package to replace).
+    in property <bool> can-apply;
+    in property <string> apply-label;
+    in property <string> confirm-apply-title;
+    in property <bool> can-undo;
+    // Outcome of the last apply or undo; "" when none.
+    in property <string> result-title;
+    in property <[string]> result-lines;
+    in property <bool> result-error;
+    // 0: no dialog, 1: confirm apply, 2: confirm undo.
+    in-out property <int> confirm;
+
+    // The screen was shown.
+    callback shown();
+    callback rescan();
+    callback apply();
+    callback undo();
+    callback dismiss-result();
+}
+
+component StatusTag inherits HorizontalLayout {
+    in property <RepairTone> tone;
+    in property <string> text;
+    property <color> tint: root.tone == RepairTone.fixable ? Theme.accent
+        : root.tone == RepairTone.update ? Theme.danger
+        : root.tone == RepairTone.fixed ? Theme.success
+        : root.tone == RepairTone.works ? Theme.success
+        : Theme.text-muted;
+    spacing: Theme.s1;
+    alignment: end;
+
+    Rectangle {
+        width: 6px;
+        height: 6px;
+        y: (parent.height - self.height) / 2;
+        border-radius: 3px;
+        background: root.tint;
+    }
+    Text {
+        text: root.text;
+        color: root.tone == RepairTone.works ? Theme.text-muted : root.tint;
+        font-size: Theme.text-md;
+        font-weight: 600;
+        vertical-alignment: center;
+    }
+}
+
+component RepairRowView inherits Rectangle {
+    in property <RepairRow> item;
+    height: layout.preferred-height;
+
+    layout := VerticalLayout {
+        padding-top: Theme.s2;
+        padding-bottom: Theme.s2 + 1px;
+        padding-left: Theme.s1;
+        padding-right: Theme.s2;
+        spacing: Theme.s1;
+
+        HorizontalLayout {
+            spacing: Theme.s2;
+            VerticalLayout {
+                spacing: 2px;
+                horizontal-stretch: 1;
+                Text {
+                    text: root.item.name;
+                    color: root.item.enabled ? Theme.text : Theme.text-muted;
+                    font-size: Theme.text-lg;
+                    font-weight: 600;
+                    overflow: elide;
+                }
+                Text {
+                    text: root.item.summary;
+                    color: Theme.text-muted;
+                    font-size: Theme.text-md;
+                    overflow: elide;
+                }
+            }
+            StatusTag {
+                width: 140px;
+                tone: root.item.tone;
+                text: root.item.status;
+            }
+        }
+
+        if root.item.changes.length > 0: HorizontalLayout {
+            spacing: Theme.s2;
+            Rectangle {
+                width: 2px;
+                background: Theme.border-strong;
+            }
+            VerticalLayout {
+                spacing: 2px;
+                for line in root.item.changes: Text {
+                    text: line;
+                    color: Theme.text;
+                    font-size: Theme.text-sm;
+                    wrap: word-wrap;
+                }
+            }
+        }
+
+        for line in root.item.remaining: Text {
+            text: line;
+            color: Theme.text-muted;
+            font-size: Theme.text-sm;
+            wrap: word-wrap;
+        }
+
+        if root.item.files != "": Text {
+            text: root.item.files;
+            color: Theme.text-faint;
+            font-size: Theme.text-sm;
+            overflow: elide;
+        }
+    }
+
+    Rectangle {
+        x: Theme.s1;
+        y: parent.height - 1px;
+        width: parent.width - Theme.s1;
+        height: 1px;
+        background: Theme.border;
+    }
+}
+
+component Notice inherits Rectangle {
+    in property <string> text;
+    in property <bool> strong;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: root.strong ? Theme.accent : Theme.border;
+    background: Theme.raised;
+    HorizontalLayout {
+        padding: Theme.s1;
+        padding-left: Theme.s2;
+        padding-right: Theme.s2;
+        Text {
+            text: root.text;
+            color: Theme.text;
+            font-size: Theme.text-md;
+            vertical-alignment: center;
+            wrap: word-wrap;
+        }
+    }
+}
+
+export component RepairPage inherits Rectangle {
+    background: Theme.bg;
+    property <bool> locked: RepairState.busy || RepairState.scanning || RepairState.game-running;
+
+    VerticalLayout {
+        padding: Theme.s3;
+        padding-bottom: 0px;
+        spacing: Theme.s2;
+
+        HorizontalLayout {
+            spacing: Theme.s2;
+            VerticalLayout {
+                spacing: 2px;
+                horizontal-stretch: 1;
+                Text {
+                    text: "Repair";
+                    color: Theme.text;
+                    font-size: Theme.text-xl;
+                    font-weight: 600;
+                }
+                Text {
+                    text: RepairState.busy ? RepairState.busy-text
+                        : RepairState.scanning ? "Checking mods against the game"
+                        : RepairState.summary;
+                    color: Theme.text-muted;
+                    font-size: Theme.text-md;
+                    overflow: elide;
+                }
+            }
+            TextButton {
+                y: (parent.height - self.height) / 2;
+                text: "Undo last repair";
+                disabled: !RepairState.can-undo || root.locked;
+                clicked => { RepairState.confirm = 2; }
+            }
+            TextButton {
+                y: (parent.height - self.height) / 2;
+                text: "Re-scan";
+                disabled: RepairState.busy || RepairState.scanning;
+                clicked => { RepairState.rescan(); }
+            }
+            Button {
+                y: (parent.height - self.height) / 2;
+                text: RepairState.apply-label;
+                primary: true;
+                disabled: !RepairState.can-apply || root.locked;
+                clicked => { RepairState.confirm = 1; }
+            }
+        }
+
+        Text {
+            text: "Game updates can break mods that ship old copies of game files. A repair adds a separate package that patches around this. Mod files stay as they are.";
+            color: Theme.text-muted;
+            font-size: Theme.text-md;
+            wrap: word-wrap;
+        }
+
+        if RepairState.game-running: Notice {
+            strong: true;
+            text: "Deadlock is running. Close it to repair mods or undo a repair, then press Re-scan.";
+        }
+
+        if RepairState.stale && !RepairState.game-running: Notice {
+            strong: true;
+            text: "Needs re-apply: your mods or the game changed since the last repair, so the repair package is out of date. Apply again to rebuild it, or undo it.";
+        }
+
+        if RepairState.result-title != "": Rectangle {
+            border-radius: Theme.radius;
+            border-width: 1px;
+            border-color: RepairState.result-error ? Theme.danger : Theme.border;
+            background: Theme.raised;
+            HorizontalLayout {
+                padding: Theme.s1;
+                padding-left: Theme.s2;
+                padding-right: Theme.s1;
+                spacing: Theme.s2;
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 2px;
+                    alignment: center;
+                    Text {
+                        text: RepairState.result-title;
+                        color: RepairState.result-error ? Theme.danger : Theme.text;
+                        font-size: Theme.text-md;
+                        font-weight: 600;
+                        wrap: word-wrap;
+                    }
+                    for line in RepairState.result-lines: Text {
+                        text: line;
+                        color: Theme.text-muted;
+                        font-size: Theme.text-sm;
+                        wrap: word-wrap;
+                    }
+                }
+                TextButton {
+                    text: "Dismiss";
+                    clicked => { RepairState.dismiss-result(); }
+                }
+            }
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+
+            if RepairState.load-state == LoadState.loading: CenteredMessage {
+                title: "Checking mods";
+                detail: "Shiv reads the game files and each mod. On a full install this can take a minute.";
+            }
+
+            if RepairState.load-state == LoadState.failed: VerticalLayout {
+                alignment: center;
+                spacing: Theme.s2;
+                CenteredMessage {
+                    title: "Couldn't check mods";
+                    detail: RepairState.error-text;
+                }
+                HorizontalLayout {
+                    alignment: center;
+                    Button {
+                        text: "Retry";
+                        primary: true;
+                        clicked => { RepairState.rescan(); }
+                    }
+                }
+            }
+
+            if RepairState.load-state == LoadState.ready && RepairState.rows.length == 0: CenteredMessage {
+                title: "No mods installed";
+                detail: "Mods you install from Browse are checked here.";
+            }
+
+            ListView {
+                visible: RepairState.load-state == LoadState.ready && RepairState.rows.length > 0;
+                for row in RepairState.rows: RepairRowView {
+                    item: row;
+                }
+            }
+        }
+    }
+}
+
+// Confirmation for Apply and Undo, modal over the whole window.
+export component RepairDialog inherits Rectangle {
+    property <bool> undo: RepairState.confirm == 2;
+    background: Theme.bg-sunken.with-alpha(0.75);
+
+    TouchArea { }
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                RepairState.confirm = 0;
+                return accept;
+            }
+            reject
+        }
+    }
+
+    init => { keys.focus(); }
+
+    Rectangle {
+        width: min(520px, root.width - 2 * Theme.s4);
+        height: min(body.preferred-height, root.height - 2 * Theme.s4);
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        background: Theme.raised;
+        border-radius: Theme.radius-md;
+        border-width: 1px;
+        border-color: Theme.border;
+
+        TouchArea { }
+
+        body := VerticalLayout {
+            padding: Theme.s3;
+            spacing: Theme.s2;
+
+            Text {
+                text: root.undo ? "Undo the last repair?" : RepairState.confirm-apply-title;
+                color: Theme.text;
+                font-size: Theme.text-xl;
+                font-weight: 600;
+                wrap: word-wrap;
+            }
+            Text {
+                text: root.undo
+                    ? "Shiv puts the repair package and gameinfo.gi back the way they were before the last repair, from the backup it made then. Your mod files are not touched."
+                    : "Shiv first backs up the files it replaces, so you can undo this. It then writes a repair package to game/citadel/shiv_repair and adds it to gameinfo.gi. Your mod files are not modified.";
+                color: Theme.text-muted;
+                font-size: Theme.text-md;
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
+                alignment: end;
+                spacing: Theme.s1;
+                Button {
+                    text: "Cancel";
+                    clicked => { RepairState.confirm = 0; }
+                }
+                Button {
+                    text: root.undo ? "Undo repair" : "Apply repair";
+                    primary: true;
+                    clicked => {
+                        if (root.undo) {
+                            RepairState.undo();
+                        } else {
+                            RepairState.apply();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

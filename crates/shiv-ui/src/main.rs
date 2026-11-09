@@ -7,6 +7,7 @@ use shiv_core::game::{self, GameError, GamePaths};
 mod browse;
 mod installed;
 mod launch;
+mod repair;
 mod thumbs;
 
 /// The API serves its routes under `/api` (`/api/v2/mods`, ...).
@@ -30,6 +31,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let cache = browse::attach(&app, &api_url);
     installed::attach(&app, cache);
     launch::attach(&app);
+    repair::attach(&app);
     // Debug builds only: open on another screen (e.g. for screenshots); 0 is Browse.
     #[cfg(debug_assertions)]
     if let Some(n) = std::env::var("SHIV_SCREEN")
@@ -37,6 +39,9 @@ fn main() -> Result<(), slint::PlatformError> {
         .and_then(|v| v.parse::<i32>().ok())
     {
         app.set_screen(n.clamp(0, 4));
+        if app.get_screen() == 4 {
+            app.global::<RepairState>().invoke_shown();
+        }
     }
     app.run()
 }
@@ -50,22 +55,38 @@ mod tests {
     use std::rc::Rc;
     use std::time::{Duration, Instant};
 
-    /// Run the event loop until `cond` holds or `timeout` passes.
+    /// Run the event loop until `cond` holds or `timeout` passes. A quit
+    /// request left over from an earlier run can end a run early, so the loop
+    /// is re-entered until the deadline.
     fn run_until(app: &App, timeout: Duration, cond: impl Fn(&App) -> bool + 'static) -> bool {
-        let met = Rc::new(Cell::new(false));
-        let flag = met.clone();
-        let weak = app.as_weak();
+        let cond: Rc<dyn Fn(&App) -> bool> = Rc::new(cond);
         let start = Instant::now();
-        let timer = Timer::default();
-        timer.start(TimerMode::Repeated, Duration::from_millis(10), move || {
-            let done = weak.upgrade().is_some_and(|a| cond(&a));
-            if done || start.elapsed() > timeout {
-                flag.set(done);
-                let _ = slint::quit_event_loop();
+        loop {
+            let met = Rc::new(Cell::new(false));
+            let quit = Rc::new(Cell::new(false));
+            let (flag, sent) = (met.clone(), quit.clone());
+            let weak = app.as_weak();
+            let check = cond.clone();
+            let timer = Timer::default();
+            timer.start(TimerMode::Repeated, Duration::from_millis(10), move || {
+                if sent.get() {
+                    return;
+                }
+                let done = weak.upgrade().is_some_and(|a| check(&a));
+                if done || start.elapsed() > timeout {
+                    flag.set(done);
+                    sent.set(true);
+                    let _ = slint::quit_event_loop();
+                }
+            });
+            slint::run_event_loop().expect("event loop");
+            if met.get() {
+                return true;
             }
-        });
-        slint::run_event_loop().expect("event loop");
-        met.get()
+            if quit.get() || start.elapsed() > timeout {
+                return false;
+            }
+        }
     }
 
     fn click(app: &App, label: &str) {
@@ -109,6 +130,263 @@ mod tests {
         install_cancel_and_failure(&stub_api());
         installed_screen();
         launch_flow();
+        repair_flow();
+    }
+
+    /// A tiny install for the repair engine (as in shiv-repair's own tests):
+    /// the game ships two heroes; the installed mod carries an outdated copy
+    /// of the table without the newer one, which a repair restores.
+    pub(crate) fn repair_fixture(root: &std::path::Path) -> shiv_core::game::GamePaths {
+        use shiv_core::sidecar::{self, Sidecar};
+        use vpkmanager::source2::kv3::{self, Value};
+
+        fn compiled(rows: Vec<(String, Value)>) -> Vec<u8> {
+            let payload = kv3::encode(&Value::Object(rows), &kv3::Format([0; 16]));
+            let total = 32 + payload.len();
+            let mut b = vec![0u8; total];
+            b[0..4].copy_from_slice(&u32::try_from(total).unwrap().to_le_bytes());
+            b[4..6].copy_from_slice(&12u16.to_le_bytes());
+            b[8..12].copy_from_slice(&8u32.to_le_bytes());
+            b[12..16].copy_from_slice(&1u32.to_le_bytes());
+            b[16..20].copy_from_slice(b"DATA");
+            b[20..24].copy_from_slice(&12u32.to_le_bytes());
+            b[24..28].copy_from_slice(&u32::try_from(payload.len()).unwrap().to_le_bytes());
+            b[32..].copy_from_slice(&payload);
+            b
+        }
+        fn hero(id: i64) -> Value {
+            Value::Object(vec![("m_HeroID".to_string(), Value::Int(id))])
+        }
+        fn pack(src: &std::path::Path, rows: Vec<(String, Value)>, out: &std::path::Path) {
+            let file = src.join("scripts/heroes.vdata_c");
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, compiled(rows)).unwrap();
+            vpkmanager::pack_directory(src, out).unwrap();
+        }
+
+        let paths = shiv_core::game::GamePaths::from_root(root.join("Deadlock"));
+        let citadel = paths.root.join("game").join("citadel");
+        std::fs::create_dir_all(&paths.addons).unwrap();
+        std::fs::write(citadel.join("steam.inf"), "ClientVersion=100\n").unwrap();
+        std::fs::write(
+            &paths.gameinfo,
+            "\"GameInfo\"\n{\n\tFileSystem\n\t{\n\t\tSearchPaths\n\t\t{\n\t\t\tGame citadel/addons\n\t\t\tGame citadel\n\t\t\tGame core\n\t\t}\n\t}\n}\n",
+        )
+        .unwrap();
+        pack(
+            &root.join("game-src"),
+            vec![("hero_a".into(), hero(1)), ("hero_new".into(), hero(2))],
+            &citadel.join("pak01_dir.vpk"),
+        );
+        pack(
+            &root.join("mod-src"),
+            vec![("hero_a".into(), hero(1))],
+            &paths.addons.join("pak01_dir.vpk"),
+        );
+        sidecar::write(
+            &paths.addons,
+            &Sidecar {
+                mod_id: "data".into(),
+                name: "Data mod".into(),
+                version: None,
+                thumbnail_url: None,
+                vpks: vec!["pak01_dir.vpk".into()],
+            },
+        )
+        .unwrap();
+        paths
+    }
+
+    /// Writes the repair fixture to `$SHIV_FIXTURE_DIR` for manual checks and
+    /// screenshots (`SHIV_GAME_ROOT=$SHIV_FIXTURE_DIR/Deadlock`).
+    #[test]
+    #[ignore = "writes a fixture for manual runs"]
+    fn write_repair_fixture() {
+        let dir = std::env::var_os("SHIV_FIXTURE_DIR").expect("SHIV_FIXTURE_DIR");
+        let paths = repair_fixture(std::path::Path::new(&dir));
+        println!("SHIV_GAME_ROOT={}", paths.root.display());
+    }
+
+    /// Repair against the temp fixture (never the real install): the check
+    /// runs off the UI thread when the screen is shown; Apply and Undo are
+    /// refused while a check runs; a running game refuses Apply with a
+    /// message; Apply asks first, backs up, writes the package and re-checks;
+    /// Undo puts everything back; a changed mod marks the package stale.
+    fn repair_flow() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let paths = repair_fixture(temp.path());
+        let overlay = paths.root.join("game/citadel/shiv_repair/pak01_dir.vpk");
+        let mod_vpk = paths.addons.join("pak01_dir.vpk");
+        let mod_bytes = std::fs::read(&mod_vpk).expect("mod");
+        let gameinfo = std::fs::read(&paths.gameinfo).expect("gameinfo");
+
+        let running = Arc::new(AtomicBool::new(false));
+        let gate = Arc::new(AtomicBool::new(false));
+        let (flag, gate_in, located) = (running.clone(), gate.clone(), paths.clone());
+        let app = App::new().expect("app");
+        repair::attach_with(
+            &app,
+            repair::Deps {
+                locate: Arc::new(move || {
+                    while gate_in.load(Ordering::Relaxed) {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Ok(located.clone())
+                }),
+                running: Arc::new(move || flag.load(Ordering::Relaxed)),
+            },
+        );
+        app.show().expect("show");
+        let state = app.global::<RepairState>();
+        let idle = |a: &App| {
+            let s = a.global::<RepairState>();
+            !s.get_scanning() && !s.get_busy() && s.get_load_state() == LoadState::Ready
+        };
+        let status = |a: &App| {
+            a.global::<RepairState>()
+                .get_rows()
+                .row_data(0)
+                .map(|r| r.status.to_string())
+        };
+
+        // Nothing runs until the screen is shown; then the check is off-thread.
+        assert_eq!(state.get_load_state(), LoadState::Loading);
+        assert!(!state.get_scanning());
+        app.set_screen(4);
+        assert!(run_until(&app, Duration::from_secs(60), idle));
+        let r = state.get_rows().row_data(0).expect("row");
+        assert_eq!(r.name.as_str(), "Data mod");
+        assert_eq!(r.tone, RepairTone::Fixable);
+        assert_eq!(r.status.as_str(), "Fixable");
+        assert!(
+            r.changes
+                .row_data(0)
+                .is_some_and(|c| c.contains("scripts/heroes.vdata_c")),
+            "{:?}",
+            r.changes.row_data(0)
+        );
+        assert_eq!(state.get_fixable_count(), 1);
+        assert!(state.get_can_apply() && !state.get_can_undo() && !state.get_stale());
+        assert_eq!(state.get_apply_label().as_str(), "Repair 1 mod");
+        assert_eq!(state.get_summary().as_str(), "1 mod, 1 fixable");
+
+        // Busy guard: while a check is in flight, Apply, Undo and another
+        // check are dropped (no second worker, nothing written).
+        gate.store(true, Ordering::Relaxed);
+        state.invoke_rescan();
+        assert!(state.get_scanning());
+        state.invoke_apply();
+        state.invoke_undo();
+        assert!(!state.get_busy());
+        run_until(&app, Duration::from_millis(300), |_| false);
+        assert!(!overlay.exists());
+        assert_eq!(
+            status(&app).as_deref(),
+            Some("Fixable"),
+            "list kept while re-checking"
+        );
+        gate.store(false, Ordering::Relaxed);
+        assert!(run_until(&app, Duration::from_secs(60), idle));
+
+        // Game running: the check reports it, and Apply (even if invoked
+        // directly) is refused by the engine with a plain message.
+        running.store(true, Ordering::Relaxed);
+        state.invoke_rescan();
+        assert!(run_until(&app, Duration::from_secs(60), idle));
+        assert!(state.get_game_running());
+        state.invoke_apply();
+        assert!(run_until(&app, Duration::from_secs(60), move |a| idle(a)
+            && a.global::<RepairState>().get_result_title() != ""));
+        assert!(state.get_result_error());
+        assert_eq!(state.get_result_title().as_str(), "Repair failed");
+        assert!(
+            state
+                .get_result_lines()
+                .row_data(0)
+                .is_some_and(|l| l.contains("Deadlock is running")),
+        );
+        assert!(!overlay.exists());
+        assert_eq!(std::fs::read(&paths.gameinfo).expect("gameinfo"), gameinfo);
+        running.store(false, Ordering::Relaxed);
+        click(&app, "Re-scan");
+        assert!(run_until(&app, Duration::from_secs(60), move |a| idle(a)
+            && !a.global::<RepairState>().get_game_running()));
+        click(&app, "Dismiss");
+        assert_eq!(state.get_result_title().as_str(), "");
+
+        // Apply asks first; Cancel writes nothing.
+        click(&app, "Repair 1 mod");
+        assert_eq!(state.get_confirm(), 1);
+        click(&app, "Cancel");
+        assert_eq!(state.get_confirm(), 0);
+        assert!(!overlay.exists());
+
+        // Apply: backup, package, gameinfo mount; the mod VPK is untouched.
+        click(&app, "Repair 1 mod");
+        click(&app, "Apply repair");
+        assert_eq!(state.get_confirm(), 0);
+        assert!(run_until(&app, Duration::from_secs(60), move |a| idle(a)
+            && a.global::<RepairState>().get_result_title()
+                == "Repaired 1 mod"));
+        assert!(!state.get_result_error());
+        let lines: Vec<String> = (0..state.get_result_lines().row_count())
+            .filter_map(|i| state.get_result_lines().row_data(i).map(|l| l.to_string()))
+            .collect();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("Backup of the replaced files: ")),
+            "{lines:?}"
+        );
+        assert!(overlay.exists());
+        assert_eq!(std::fs::read(&mod_vpk).expect("mod"), mod_bytes);
+        assert_ne!(std::fs::read(&paths.gameinfo).expect("gameinfo"), gameinfo);
+        assert_eq!(status(&app).as_deref(), Some("Repaired"));
+        assert_eq!(state.get_fixable_count(), 0);
+        assert!(state.get_can_undo());
+
+        // Undo asks first, then puts the package and gameinfo back.
+        click(&app, "Undo last repair");
+        assert_eq!(state.get_confirm(), 2);
+        click(&app, "Undo repair");
+        assert!(run_until(&app, Duration::from_secs(60), move |a| idle(a)
+            && a.global::<RepairState>().get_result_title()
+                == "Last repair undone"));
+        assert!(!overlay.exists());
+        assert_eq!(std::fs::read(&paths.gameinfo).expect("gameinfo"), gameinfo);
+        assert_eq!(std::fs::read(&mod_vpk).expect("mod"), mod_bytes);
+        assert_eq!(status(&app).as_deref(), Some("Fixable"));
+        assert!(!state.get_can_undo());
+
+        // A mod changed after a repair: the package is stale ("needs re-apply").
+        click(&app, "Repair 1 mod");
+        click(&app, "Apply repair");
+        assert!(run_until(&app, Duration::from_secs(60), move |a| idle(a)
+            && a.global::<RepairState>().get_result_title()
+                == "Repaired 1 mod"));
+        let later = std::time::SystemTime::now() + Duration::from_secs(120);
+        std::fs::File::options()
+            .write(true)
+            .open(&mod_vpk)
+            .and_then(|f| f.set_modified(later))
+            .expect("touch");
+        click(&app, "Re-scan");
+        let stale = run_until(&app, Duration::from_secs(60), move |a| {
+            idle(a) && a.global::<RepairState>().get_stale()
+        });
+        assert!(
+            stale,
+            "{:?} {:?} {} {:?}",
+            status(&app),
+            shiv_repair::overlay_state(&paths),
+            overlay.exists(),
+            std::fs::metadata(&mod_vpk).and_then(|m| m.modified())
+        );
+        assert_eq!(state.get_apply_label().as_str(), "Re-apply repairs");
+        assert!(state.get_can_apply());
     }
 
     /// Launch against a temp install with a fake launcher (Steam is never

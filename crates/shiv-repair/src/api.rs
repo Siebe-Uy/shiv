@@ -898,6 +898,11 @@ pub struct RestoreReport {
     pub removed: Vec<PathBuf>,
 }
 
+/// Whether [`restore_last`] has a repair to undo (a backup set not yet restored).
+pub fn can_undo(paths: &GamePaths) -> bool {
+    latest_backup_set(&backup_dir(paths)).is_ok_and(|backup| backup.is_some())
+}
+
 /// Undo the last [`apply`]: puts back the package, receipt, learned data and
 /// `gameinfo.gi` exactly as they were before it, and removes files it created.
 /// Refuses while the game runs.
@@ -1202,8 +1207,10 @@ mod tests {
         let fx = fixture();
         let backups = fx.paths.addons.join(".shiv").join("repair-backups");
         let before = snapshot(&fx.paths.root);
+        assert!(!can_undo(&fx.paths));
         apply_with(&fx.paths, &["data".into()], || false).unwrap();
         assert_ne!(snapshot_except(&fx.paths.root, Some(&backups)), before);
+        assert!(can_undo(&fx.paths));
 
         assert!(matches!(
             restore_last_with(&fx.paths, || true),
@@ -1216,6 +1223,7 @@ mod tests {
         assert_eq!(only(&analyze(&fx.paths, 100)).status, RepairStatus::Fixable);
 
         // That repair is undone; there is nothing further back.
+        assert!(!can_undo(&fx.paths));
         assert!(matches!(
             restore_last_with(&fx.paths, || false),
             Err(RepairError::BackupRestoreFailed(_))

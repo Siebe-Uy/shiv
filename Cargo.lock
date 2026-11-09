@@ -4441,11 +4441,13 @@ dependencies = [
  "image",
  "shiv-api",
  "shiv-core",
+ "shiv-repair",
  "slint",
  "slint-build",
  "tempfile",
  "tiny_http",
  "ureq",
+ "vpkmanager",
 ]
 
 [[package]]
