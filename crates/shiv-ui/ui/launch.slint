@@ -1,0 +1,197 @@
+// Launch: the sidebar Launch button, its status line, and the findings dialog
+// shown when the pre-launch health check finds problems.
+
+import { ListView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Button, TextButton } from "widgets.slint";
+
+export struct FindingRow {
+    title: string,
+    file: string,
+    detail: string,
+}
+
+export global LaunchState {
+    // A check or launch is running on a worker thread.
+    in property <bool> busy;
+    in property <string> busy-text;
+    // Findings of the most recent check.
+    in property <[FindingRow]> findings;
+    in property <string> problems-text;
+    // Short form for the sidebar ("2 problems").
+    in property <string> problems-short;
+    // Result of the last launch or a failed check; "" when none.
+    in property <string> status-text;
+    in property <bool> status-error;
+    in-out property <bool> dialog-open;
+
+    callback launch();
+    callback launch-anyway();
+    callback cancel();
+    callback review();
+}
+
+// Bottom of the sidebar.
+export component LaunchPanel inherits VerticalLayout {
+    spacing: Theme.s1;
+
+    if LaunchState.findings.length > 0 && !LaunchState.busy: HorizontalLayout {
+        spacing: Theme.s1;
+        Rectangle {
+            width: 6px;
+            height: 6px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 3px;
+            background: Theme.danger;
+        }
+        Text {
+            text: LaunchState.problems-short;
+            color: Theme.text-muted;
+            font-size: Theme.text-sm;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+        TextButton {
+            text: "Review";
+            clicked => { LaunchState.review(); }
+        }
+    }
+
+    if LaunchState.busy || LaunchState.status-text != "": Text {
+        text: LaunchState.busy ? LaunchState.busy-text : LaunchState.status-text;
+        color: LaunchState.status-error && !LaunchState.busy ? Theme.danger : Theme.text-muted;
+        font-size: Theme.text-sm;
+        wrap: word-wrap;
+    }
+
+    Button {
+        text: "Launch";
+        primary: true;
+        disabled: LaunchState.busy;
+        clicked => { LaunchState.launch(); }
+    }
+}
+
+component FindingView inherits Rectangle {
+    in property <FindingRow> item;
+    height: layout.preferred-height;
+
+    layout := VerticalLayout {
+        padding-top: Theme.s1;
+        padding-bottom: Theme.s1;
+        spacing: 2px;
+        Text {
+            text: root.item.title;
+            color: Theme.text;
+            font-size: Theme.text-md;
+            font-weight: 600;
+        }
+        if root.item.file != "": Text {
+            text: root.item.file;
+            color: Theme.text-muted;
+            font-size: Theme.text-sm;
+            overflow: elide;
+        }
+        Text {
+            text: root.item.detail;
+            color: Theme.text-muted;
+            font-size: Theme.text-sm;
+            wrap: word-wrap;
+        }
+    }
+
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: Theme.border;
+    }
+}
+
+// Modal over the whole window.
+export component LaunchDialog inherits Rectangle {
+    background: Theme.bg-sunken.with-alpha(0.75);
+
+    // Swallow clicks on the scrim.
+    TouchArea { }
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                LaunchState.cancel();
+                return accept;
+            }
+            reject
+        }
+    }
+
+    init => { keys.focus(); }
+
+    card := Rectangle {
+        width: min(560px, root.width - 2 * Theme.s4);
+        height: min(body.preferred-height, root.height - 2 * Theme.s4);
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        background: Theme.raised;
+        border-radius: Theme.radius-md;
+        border-width: 1px;
+        border-color: Theme.border;
+
+        // The card itself must not pass clicks to the scrim below.
+        TouchArea { }
+
+        body := VerticalLayout {
+            padding: Theme.s3;
+            spacing: Theme.s2;
+
+            VerticalLayout {
+                spacing: Theme.s1;
+                Text {
+                    text: "Problems found before launch";
+                    color: Theme.text;
+                    font-size: Theme.text-xl;
+                    font-weight: 600;
+                }
+                Text {
+                    text: LaunchState.problems-text + ". These can stop mods from loading or crash the game.";
+                    color: Theme.text-muted;
+                    font-size: Theme.text-md;
+                    wrap: word-wrap;
+                }
+            }
+
+            Rectangle {
+                height: min(LaunchState.findings.length * 72px, 288px);
+                border-width: 1px;
+                border-color: Theme.border;
+                border-radius: Theme.radius;
+                background: Theme.bg;
+                clip: true;
+
+                ListView {
+                    x: Theme.s2;
+                    width: parent.width - Theme.s2;
+                    height: parent.height;
+                    for f in LaunchState.findings: FindingView {
+                        width: parent.width - Theme.s2;
+                        item: f;
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                alignment: end;
+                spacing: Theme.s1;
+                Button {
+                    text: "Cancel";
+                    clicked => { LaunchState.cancel(); }
+                }
+                Button {
+                    text: "Launch anyway";
+                    primary: true;
+                    clicked => { LaunchState.launch-anyway(); }
+                }
+            }
+        }
+    }
+}

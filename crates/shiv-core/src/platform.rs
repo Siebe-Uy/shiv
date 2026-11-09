@@ -60,3 +60,29 @@ pub fn default_steam_dirs() -> Vec<PathBuf> {
 pub fn default_steam_dirs() -> Vec<PathBuf> {
     Vec::new()
 }
+
+/// Program (and leading arguments) that hands a URI to its registered handler.
+#[cfg(target_os = "linux")]
+pub fn uri_opener() -> (&'static str, &'static [&'static str]) {
+    ("xdg-open", &[])
+}
+
+/// Program (and leading arguments) that hands a URI to its registered handler.
+#[cfg(target_os = "macos")]
+pub fn uri_opener() -> (&'static str, &'static [&'static str]) {
+    ("open", &[])
+}
+
+/// Program (and leading arguments) that hands a URI to its registered handler.
+/// `explorer.exe <uri>` avoids `cmd /C start`, whose parsing of `&` and `^`
+/// would need escaping.
+#[cfg(windows)]
+pub fn uri_opener() -> (&'static str, &'static [&'static str]) {
+    ("explorer.exe", &[])
+}
+
+/// Other Unix-likes follow the freedesktop convention.
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+pub fn uri_opener() -> (&'static str, &'static [&'static str]) {
+    ("xdg-open", &[])
+}

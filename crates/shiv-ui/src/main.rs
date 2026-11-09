@@ -6,6 +6,7 @@ use shiv_core::game::{self, GameError, GamePaths};
 
 mod browse;
 mod installed;
+mod launch;
 mod thumbs;
 
 /// The API serves its routes under `/api` (`/api/v2/mods`, ...).
@@ -28,6 +29,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let api_url = std::env::var("SHIV_API_URL").unwrap_or_else(|_| DEFAULT_API_URL.to_owned());
     let cache = browse::attach(&app, &api_url);
     installed::attach(&app, cache);
+    launch::attach(&app);
     // Debug builds only: open on another screen (e.g. for screenshots); 0 is Browse.
     #[cfg(debug_assertions)]
     if let Some(n) = std::env::var("SHIV_SCREEN")
@@ -106,6 +108,88 @@ mod tests {
         }
         install_cancel_and_failure(&stub_api());
         installed_screen();
+        launch_flow();
+    }
+
+    /// Launch against a temp install with a fake launcher (Steam is never
+    /// started): the startup check reports problems, Launch shows the dialog,
+    /// Cancel launches nothing, Launch anyway does, and a clean install
+    /// launches at once without the dialog.
+    fn launch_flow() {
+        use shiv_core::game::GamePaths;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let paths = GamePaths::from_root(root.path().to_path_buf());
+        std::fs::create_dir_all(&paths.addons).expect("addons");
+        std::fs::write(
+            &paths.gameinfo,
+            "GameInfo { FileSystem { SearchPaths { Game citadel/addons\n Game citadel } } }",
+        )
+        .expect("gameinfo");
+        let bad = paths.addons.join("pak01_dir.vpk");
+        std::fs::write(&bad, b"").expect("zero-byte vpk");
+
+        let launches = Arc::new(AtomicUsize::new(0));
+        let counter = launches.clone();
+        let located = paths.clone();
+        let app = App::new().expect("app");
+        launch::attach_with(
+            &app,
+            launch::Deps {
+                locate: Arc::new(move || Ok(located.clone())),
+                check: Arc::new(shiv_core::health::check),
+                launch: Arc::new(move |_| {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }),
+            },
+        );
+        app.show().expect("show");
+        let state = app.global::<LaunchState>();
+        let idle = |a: &App| !a.global::<LaunchState>().get_busy();
+
+        // Startup check: findings shown in the sidebar, no dialog, no launch.
+        assert!(run_until(&app, Duration::from_secs(20), idle));
+        assert_eq!(state.get_findings().row_count(), 1);
+        assert_eq!(state.get_problems_text().as_str(), "1 problem found");
+        assert!(!state.get_dialog_open());
+        assert_eq!(launches.load(Ordering::SeqCst), 0);
+
+        // Launch: re-checks, then asks.
+        click(&app, "Launch");
+        assert!(run_until(&app, Duration::from_secs(20), |a| a
+            .global::<LaunchState>()
+            .get_dialog_open()));
+        let row = state.get_findings().row_data(0).expect("row");
+        assert_eq!(row.title.as_str(), "Empty VPK");
+        assert_eq!(row.file.as_str(), "addons/pak01_dir.vpk");
+        click(&app, "Cancel");
+        assert!(!state.get_dialog_open());
+        run_until(&app, Duration::from_millis(200), |_| false);
+        assert_eq!(launches.load(Ordering::SeqCst), 0);
+
+        // Review reopens it; Launch anyway launches.
+        click(&app, "Review");
+        assert!(state.get_dialog_open());
+        click(&app, "Launch anyway");
+        assert!(!state.get_dialog_open());
+        assert!(run_until(&app, Duration::from_secs(20), idle));
+        assert_eq!(launches.load(Ordering::SeqCst), 1);
+        assert!(!state.get_status_error());
+        assert!(state.get_status_text().contains("starting"));
+
+        // Clean install: Launch goes straight through.
+        std::fs::remove_file(&bad).expect("remove");
+        click(&app, "Launch");
+        assert!(run_until(&app, Duration::from_secs(20), |a| {
+            !a.global::<LaunchState>().get_busy()
+                && a.global::<LaunchState>().get_status_text() != ""
+        }));
+        assert!(!state.get_dialog_open());
+        assert_eq!(state.get_findings().row_count(), 0);
+        assert_eq!(launches.load(Ordering::SeqCst), 2);
     }
 
     /// Installed screen against a temp addons dir (never the real one):

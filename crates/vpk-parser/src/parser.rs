@@ -47,6 +47,31 @@ impl VpkParser {
         parser.parse_directory_tree_with_preload(tree_start, header.tree_length as usize)
     }
 
+    /// Reads only the fixed header (12 bytes for version 1, 28 for version 2).
+    ///
+    /// A file with fewer than 4 bytes, or a valid signature but a short header,
+    /// is [`VpkError::BufferTooSmall`]; `actual` tells the two apart.
+    pub fn header_from_file(path: &Path) -> Result<VpkHeader> {
+        let file = File::open(path)?;
+        let mut buf = Vec::with_capacity(28);
+        file.take(28).read_to_end(&mut buf)?;
+        if buf.len() >= 4 {
+            let signature = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+            if signature != VPK_SIGNATURE {
+                return Err(VpkError::InvalidSignature {
+                    expected: VPK_SIGNATURE,
+                    actual: signature,
+                });
+            }
+        }
+        Self::new(buf).parse_header()
+    }
+
+    /// Size in bytes of the fixed header for a given VPK version.
+    pub fn header_size(version: u32) -> u64 {
+        if version >= 2 { 28 } else { 12 }
+    }
+
     /// Parses a VPK on disk, hashing its contents in chunks so memory use
     /// stays at the size of the directory tree instead of the whole file.
     pub fn parse_file(path: &Path, options: VpkParseOptions) -> Result<VpkParsed> {

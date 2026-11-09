@@ -3,8 +3,9 @@
 import { Theme } from "theme.slint";
 import { BrowsePage, BrowseState, ModRow, LoadState, InstallState } from "browse.slint";
 import { InstalledPage, InstalledState, InstalledRow } from "installed.slint";
+import { LaunchPanel, LaunchDialog, LaunchState, FindingRow } from "launch.slint";
 
-export { BrowseState, ModRow, LoadState, InstallState, InstalledState, InstalledRow }
+export { BrowseState, ModRow, LoadState, InstallState, InstalledState, InstalledRow, LaunchState, FindingRow }
 
 component NavItem inherits Rectangle {
     in property <string> label;
@@ -96,7 +97,6 @@ export component App inherits Window {
             VerticalLayout {
                 padding: Theme.s2;
                 spacing: Theme.s1;
-                alignment: start;
 
                 Rectangle {
                     height: Theme.s4 * 2;
@@ -116,6 +116,10 @@ export component App inherits Window {
                     active: root.screen == i;
                     clicked => { root.screen = i; }
                 }
+
+                Rectangle { vertical-stretch: 1; }
+
+                LaunchPanel { }
             }
 
             Rectangle {
@@ -148,5 +152,12 @@ export component App inherits Window {
                 title: name;
             }
         }
+    }
+
+    if LaunchState.dialog-open: LaunchDialog {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
     }
 }
