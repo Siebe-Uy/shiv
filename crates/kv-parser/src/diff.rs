@@ -196,12 +196,12 @@ impl DiffGenerator {
                     if let Some(old_val) = &change.old_value {
                         output.push_str(&format!("  - Old: {}\n", Self::format_value(old_val)));
                     } else {
-                        output.push_str(&format!("  - Old: <missing value>\n"));
+                        output.push_str("  - Old: <missing value>\n");
                     }
                     if let Some(new_val) = &change.new_value {
                         output.push_str(&format!("  + New: {}\n", Self::format_value(new_val)));
                     } else {
-                        output.push_str(&format!("  + New: <missing value>\n"));
+                        output.push_str("  + New: <missing value>\n");
                     }
                 }
             }
@@ -286,8 +286,8 @@ impl DiffApplicator {
 
     fn apply_change_to_ast(ast: &mut DocumentNode, change: &DiffEntry) -> Result<()> {
         // Handle comment Replace operations (uses old_comment/new_comment fields)
-        if change.old_comment.is_some() || change.new_comment.is_some() {
-            if change.op == DiffOp::Replace {
+        if (change.old_comment.is_some() || change.new_comment.is_some())
+            && change.op == DiffOp::Replace {
                 let path_parts: Vec<&str> = change.path.split('.').collect();
                 let position = change.comment_position.unwrap_or(CommentPosition::Before);
 
@@ -299,7 +299,6 @@ impl DiffApplicator {
                 }
                 return Ok(());
             }
-        }
 
         // Handle comment Add/Remove operations (uses comment field)
         if let Some(comment_text) = &change.comment {
@@ -494,18 +493,16 @@ impl DiffApplicator {
         let mut positions_to_remove: Vec<usize> = Vec::new();
         let mut is_first = true;
         for (i, child) in children.iter().enumerate() {
-            if let AstNode::KeyValue(kv) = child {
-                if kv.key.value == key {
+            if let AstNode::KeyValue(kv) = child
+                && kv.key.value == key {
                     // For non-first occurrences, remove preceding whitespace
-                    if !is_first && i > 0 && matches!(&children[i - 1], AstNode::Whitespace(_)) {
-                        if positions_to_remove.last() != Some(&(i - 1)) {
+                    if !is_first && i > 0 && matches!(&children[i - 1], AstNode::Whitespace(_))
+                        && positions_to_remove.last() != Some(&(i - 1)) {
                             positions_to_remove.push(i - 1);
                         }
-                    }
                     positions_to_remove.push(i);
                     is_first = false;
                 }
-            }
         }
 
         // Remove in reverse order to preserve indices
@@ -1022,20 +1019,18 @@ impl DiffApplicator {
         let mut positions_to_remove: Vec<usize> = Vec::new();
 
         for (i, child) in children.iter().enumerate() {
-            if let AstNode::KeyValue(kv) = child {
-                if kv.key.value == key {
+            if let AstNode::KeyValue(kv) = child
+                && kv.key.value == key {
                     // Check if previous node is whitespace - if so, mark it for removal too
-                    if i > 0 {
-                        if let AstNode::Whitespace(_) = &children[i - 1] {
+                    if i > 0
+                        && let AstNode::Whitespace(_) = &children[i - 1] {
                             // Only remove whitespace if it's not already marked for removal
                             if !positions_to_remove.contains(&(i - 1)) {
                                 positions_to_remove.push(i - 1);
                             }
                         }
-                    }
                     positions_to_remove.push(i);
                 }
-            }
         }
 
         if positions_to_remove.is_empty() {
@@ -1249,7 +1244,7 @@ impl DiffApplicator {
     }
 
     fn add_comment_in_nested_path(
-        children: &mut Vec<AstNode>,
+        children: &mut [AstNode],
         path_parts: &[&str],
         comment_text: &str,
         position: CommentPosition,
@@ -1457,7 +1452,7 @@ impl DiffApplicator {
     }
 
     fn remove_comment_in_nested_path(
-        children: &mut Vec<AstNode>,
+        children: &mut [AstNode],
         path_parts: &[&str],
         comment_text: &str,
     ) -> Result<()> {
@@ -1490,29 +1485,26 @@ impl DiffApplicator {
         let mut positions_to_remove: Vec<usize> = Vec::new();
 
         for (i, child) in children.iter().enumerate() {
-            if let AstNode::Comment(comment) = child {
-                if comment.value.contains(comment_text) {
+            if let AstNode::Comment(comment) = child
+                && comment.value.contains(comment_text) {
                     // Check if previous node is whitespace - if so, mark it for removal too
-                    if i > 0 {
-                        if let AstNode::Whitespace(_) = &children[i - 1] {
+                    if i > 0
+                        && let AstNode::Whitespace(_) = &children[i - 1] {
                             // Only remove whitespace if it's not already marked for removal
                             if !positions_to_remove.contains(&(i - 1)) {
                                 positions_to_remove.push(i - 1);
                             }
                         }
-                    }
                     // Check if next node is whitespace - if so, mark it for removal too
-                    if i + 1 < children.len() {
-                        if let AstNode::Whitespace(_) = &children[i + 1] {
+                    if i + 1 < children.len()
+                        && let AstNode::Whitespace(_) = &children[i + 1] {
                             // Only remove whitespace if it's not already marked for removal
                             if !positions_to_remove.contains(&(i + 1)) {
                                 positions_to_remove.push(i + 1);
                             }
                         }
-                    }
                     positions_to_remove.push(i);
                 }
-            }
         }
 
         if positions_to_remove.is_empty() {
@@ -1576,11 +1568,10 @@ fn comment_exists_at_path(
 
         // Find the key-value node with this key
         let found = children.iter().find_map(|child| {
-            if let AstNode::KeyValue(kv) = child {
-                if kv.key.value == *part {
+            if let AstNode::KeyValue(kv) = child
+                && kv.key.value == *part {
                     return Some(kv);
                 }
-            }
             None
         });
 
@@ -1645,8 +1636,8 @@ fn check_add_already_applied(
 
     let last_key = path_parts[path_parts.len() - 1];
 
-    if let Some(new_value) = &change.new_value {
-        if let Some(existing_value) = current.get(last_key) {
+    if let Some(new_value) = &change.new_value
+        && let Some(existing_value) = current.get(last_key) {
             match (new_value, existing_value) {
                 (KeyValuesValue::Array(expected_arr), _) => {
                     let actual_values = get_all_values_for_key(current, last_key);
@@ -1657,7 +1648,6 @@ fn check_add_already_applied(
                 }
             }
         }
-    }
 
     Ok(false)
 }
@@ -1704,8 +1694,8 @@ fn check_replace_already_applied(
 
     let last_key = path_parts[path_parts.len() - 1];
 
-    if let Some(new_value) = &change.new_value {
-        if let Some(existing_value) = current.get(last_key) {
+    if let Some(new_value) = &change.new_value
+        && let Some(existing_value) = current.get(last_key) {
             match (new_value, existing_value) {
                 (KeyValuesValue::Array(expected_arr), _) => {
                     let actual_values = get_all_values_for_key(current, last_key);
@@ -1716,7 +1706,6 @@ fn check_replace_already_applied(
                 }
             }
         }
-    }
 
     Ok(false)
 }
