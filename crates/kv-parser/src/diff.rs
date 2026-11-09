@@ -287,18 +287,19 @@ impl DiffApplicator {
     fn apply_change_to_ast(ast: &mut DocumentNode, change: &DiffEntry) -> Result<()> {
         // Handle comment Replace operations (uses old_comment/new_comment fields)
         if (change.old_comment.is_some() || change.new_comment.is_some())
-            && change.op == DiffOp::Replace {
-                let path_parts: Vec<&str> = change.path.split('.').collect();
-                let position = change.comment_position.unwrap_or(CommentPosition::Before);
+            && change.op == DiffOp::Replace
+        {
+            let path_parts: Vec<&str> = change.path.split('.').collect();
+            let position = change.comment_position.unwrap_or(CommentPosition::Before);
 
-                if let Some(old_comment) = &change.old_comment {
-                    Self::remove_comment_from_ast_path(ast, &path_parts, old_comment)?;
-                }
-                if let Some(new_comment) = &change.new_comment {
-                    Self::add_comment_to_ast_path(ast, &path_parts, new_comment, position)?;
-                }
-                return Ok(());
+            if let Some(old_comment) = &change.old_comment {
+                Self::remove_comment_from_ast_path(ast, &path_parts, old_comment)?;
             }
+            if let Some(new_comment) = &change.new_comment {
+                Self::add_comment_to_ast_path(ast, &path_parts, new_comment, position)?;
+            }
+            return Ok(());
+        }
 
         // Handle comment Add/Remove operations (uses comment field)
         if let Some(comment_text) = &change.comment {
@@ -494,15 +495,19 @@ impl DiffApplicator {
         let mut is_first = true;
         for (i, child) in children.iter().enumerate() {
             if let AstNode::KeyValue(kv) = child
-                && kv.key.value == key {
-                    // For non-first occurrences, remove preceding whitespace
-                    if !is_first && i > 0 && matches!(&children[i - 1], AstNode::Whitespace(_))
-                        && positions_to_remove.last() != Some(&(i - 1)) {
-                            positions_to_remove.push(i - 1);
-                        }
-                    positions_to_remove.push(i);
-                    is_first = false;
+                && kv.key.value == key
+            {
+                // For non-first occurrences, remove preceding whitespace
+                if !is_first
+                    && i > 0
+                    && matches!(&children[i - 1], AstNode::Whitespace(_))
+                    && positions_to_remove.last() != Some(&(i - 1))
+                {
+                    positions_to_remove.push(i - 1);
                 }
+                positions_to_remove.push(i);
+                is_first = false;
+            }
         }
 
         // Remove in reverse order to preserve indices
@@ -1020,17 +1025,19 @@ impl DiffApplicator {
 
         for (i, child) in children.iter().enumerate() {
             if let AstNode::KeyValue(kv) = child
-                && kv.key.value == key {
-                    // Check if previous node is whitespace - if so, mark it for removal too
-                    if i > 0
-                        && let AstNode::Whitespace(_) = &children[i - 1] {
-                            // Only remove whitespace if it's not already marked for removal
-                            if !positions_to_remove.contains(&(i - 1)) {
-                                positions_to_remove.push(i - 1);
-                            }
-                        }
-                    positions_to_remove.push(i);
+                && kv.key.value == key
+            {
+                // Check if previous node is whitespace - if so, mark it for removal too
+                if i > 0
+                    && let AstNode::Whitespace(_) = &children[i - 1]
+                {
+                    // Only remove whitespace if it's not already marked for removal
+                    if !positions_to_remove.contains(&(i - 1)) {
+                        positions_to_remove.push(i - 1);
+                    }
                 }
+                positions_to_remove.push(i);
+            }
         }
 
         if positions_to_remove.is_empty() {
@@ -1486,25 +1493,28 @@ impl DiffApplicator {
 
         for (i, child) in children.iter().enumerate() {
             if let AstNode::Comment(comment) = child
-                && comment.value.contains(comment_text) {
-                    // Check if previous node is whitespace - if so, mark it for removal too
-                    if i > 0
-                        && let AstNode::Whitespace(_) = &children[i - 1] {
-                            // Only remove whitespace if it's not already marked for removal
-                            if !positions_to_remove.contains(&(i - 1)) {
-                                positions_to_remove.push(i - 1);
-                            }
-                        }
-                    // Check if next node is whitespace - if so, mark it for removal too
-                    if i + 1 < children.len()
-                        && let AstNode::Whitespace(_) = &children[i + 1] {
-                            // Only remove whitespace if it's not already marked for removal
-                            if !positions_to_remove.contains(&(i + 1)) {
-                                positions_to_remove.push(i + 1);
-                            }
-                        }
-                    positions_to_remove.push(i);
+                && comment.value.contains(comment_text)
+            {
+                // Check if previous node is whitespace - if so, mark it for removal too
+                if i > 0
+                    && let AstNode::Whitespace(_) = &children[i - 1]
+                {
+                    // Only remove whitespace if it's not already marked for removal
+                    if !positions_to_remove.contains(&(i - 1)) {
+                        positions_to_remove.push(i - 1);
+                    }
                 }
+                // Check if next node is whitespace - if so, mark it for removal too
+                if i + 1 < children.len()
+                    && let AstNode::Whitespace(_) = &children[i + 1]
+                {
+                    // Only remove whitespace if it's not already marked for removal
+                    if !positions_to_remove.contains(&(i + 1)) {
+                        positions_to_remove.push(i + 1);
+                    }
+                }
+                positions_to_remove.push(i);
+            }
         }
 
         if positions_to_remove.is_empty() {
@@ -1530,7 +1540,9 @@ pub fn is_patch_already_applied(content: &str, diff: &DocumentDiff) -> Result<bo
 
     for change in &diff.changes {
         let is_applied = match change.op {
-            DiffOp::Add => check_add_already_applied(&parse_result.data, &parse_result.ast, change)?,
+            DiffOp::Add => {
+                check_add_already_applied(&parse_result.data, &parse_result.ast, change)?
+            }
             DiffOp::Replace => {
                 check_replace_already_applied(&parse_result.data, &parse_result.ast, change)?
             }
@@ -1569,9 +1581,10 @@ fn comment_exists_at_path(
         // Find the key-value node with this key
         let found = children.iter().find_map(|child| {
             if let AstNode::KeyValue(kv) = child
-                && kv.key.value == *part {
-                    return Some(kv);
-                }
+                && kv.key.value == *part
+            {
+                return Some(kv);
+            }
             None
         });
 
@@ -1637,17 +1650,18 @@ fn check_add_already_applied(
     let last_key = path_parts[path_parts.len() - 1];
 
     if let Some(new_value) = &change.new_value
-        && let Some(existing_value) = current.get(last_key) {
-            match (new_value, existing_value) {
-                (KeyValuesValue::Array(expected_arr), _) => {
-                    let actual_values = get_all_values_for_key(current, last_key);
-                    return Ok(arrays_match(expected_arr, &actual_values));
-                }
-                _ => {
-                    return Ok(values_equal(existing_value, new_value));
-                }
+        && let Some(existing_value) = current.get(last_key)
+    {
+        match (new_value, existing_value) {
+            (KeyValuesValue::Array(expected_arr), _) => {
+                let actual_values = get_all_values_for_key(current, last_key);
+                return Ok(arrays_match(expected_arr, &actual_values));
+            }
+            _ => {
+                return Ok(values_equal(existing_value, new_value));
             }
         }
+    }
 
     Ok(false)
 }
@@ -1695,17 +1709,18 @@ fn check_replace_already_applied(
     let last_key = path_parts[path_parts.len() - 1];
 
     if let Some(new_value) = &change.new_value
-        && let Some(existing_value) = current.get(last_key) {
-            match (new_value, existing_value) {
-                (KeyValuesValue::Array(expected_arr), _) => {
-                    let actual_values = get_all_values_for_key(current, last_key);
-                    return Ok(arrays_match(expected_arr, &actual_values));
-                }
-                _ => {
-                    return Ok(values_equal(existing_value, new_value));
-                }
+        && let Some(existing_value) = current.get(last_key)
+    {
+        match (new_value, existing_value) {
+            (KeyValuesValue::Array(expected_arr), _) => {
+                let actual_values = get_all_values_for_key(current, last_key);
+                return Ok(arrays_match(expected_arr, &actual_values));
+            }
+            _ => {
+                return Ok(values_equal(existing_value, new_value));
             }
         }
+    }
 
     Ok(false)
 }
@@ -2635,7 +2650,7 @@ mod tests {
             "Patch should be applied to target"
         );
     }
- 
+
     #[test]
     fn test_replace_array_keyvalues_preserves_indentation() {
         // Test that replacing array values preserves proper indentation (3 tabs for SearchPaths)
@@ -2759,8 +2774,7 @@ mod tests {
             "Start marker should have tab indentation"
         );
     }
- 
- 
+
     #[test]
     fn test_no_orphaned_whitespace_after_removal() {
         // Test that removing KeyValue nodes also removes their associated whitespace
@@ -2897,8 +2911,7 @@ mod tests {
 
         let err = result.unwrap_err();
         assert!(
-            err.to_string()
-                .contains("old_comment/new_comment"),
+            err.to_string().contains("old_comment/new_comment"),
             "Error message should mention old_comment/new_comment fields"
         );
     }
