@@ -17,6 +17,10 @@ pub const DISPLAY_H: u32 = 135;
 const MAX_DOWNLOAD: u64 = 10 * 1024 * 1024;
 /// Remembered failed URLs before the list is reset (keeps it bounded).
 const MAX_FAILED: usize = 4096;
+/// Decode limits per image. With several workers decoding at once these bound
+/// the transient memory spike (thumbnail sources are ~530 px wide).
+const MAX_DIMENSION: u32 = 4096;
+const MAX_DECODE_ALLOC: u64 = 64 * 1024 * 1024;
 
 /// A decoded thumbnail: tightly packed RGBA8 pixels.
 #[derive(Debug, Clone)]
@@ -135,6 +139,11 @@ impl Cache {
         self.lock().failed.contains(url)
     }
 
+    /// Forget past failures so they are fetched again (used on Retry).
+    pub fn clear_failed(&self) {
+        self.lock().failed.clear();
+    }
+
     /// Cached image, or fetch and decode it (blocking). The lock is not held
     /// while fetching, so several workers can fetch at once.
     pub fn get_or_fetch(&self, url: &str) -> Option<Image> {
@@ -180,9 +189,9 @@ fn decode(bytes: &[u8]) -> Option<Image> {
         .with_guessed_format()
         .ok()?;
     let mut limits = image::Limits::default();
-    limits.max_image_width = Some(8192);
-    limits.max_image_height = Some(8192);
-    limits.max_alloc = Some(256 * 1024 * 1024);
+    limits.max_image_width = Some(MAX_DIMENSION);
+    limits.max_image_height = Some(MAX_DIMENSION);
+    limits.max_alloc = Some(MAX_DECODE_ALLOC);
     reader.limits(limits);
     let img = reader.decode().ok()?;
     let rgba = img
@@ -245,5 +254,18 @@ mod tests {
         assert_eq!((img.width(), img.height()), (DISPLAY_W, DISPLAY_H));
         assert_eq!(img.rgba().len(), THUMB_BYTES);
         assert_eq!(&img.rgba()[..4], &[200, 100, 50, 255]);
+    }
+
+    #[test]
+    fn cache_rejects_images_over_decode_limits() {
+        // Tiny when encoded, but wider than MAX_DIMENSION.
+        let cache = Cache::with_fetcher(10 * THUMB_BYTES, |_| Some(png(MAX_DIMENSION + 1, 8, [1, 2, 3])));
+        assert!(cache.get_or_fetch("huge").is_none());
+        assert!(cache.has_failed("huge"));
+        cache.clear_failed();
+        assert!(!cache.has_failed("huge"));
+        // Garbage bytes are a failure too, not a panic.
+        let junk = Cache::with_fetcher(THUMB_BYTES, |_| Some(vec![0xFF, 0xD8, 0xFF, 0x00, 0x01]));
+        assert!(junk.get_or_fetch("junk").is_none());
     }
 }

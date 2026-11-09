@@ -126,15 +126,39 @@ mod tests {
         };
         assert_eq!(row_state(&app), Some(InstallState::Idle));
 
+        // Deterministic: worker posts are only applied while the event loop
+        // runs, so nothing below races with the real worker.
+        use browse::test_hooks as hooks;
         state.invoke_install("m1".into());
         assert_eq!(row_state(&app), Some(InstallState::Downloading));
+        let first = hooks::job_generation("m1").expect("job");
+        assert_eq!(hooks::in_flight("m1"), Some(first));
+        // A second Install while the job runs is a no-op.
+        state.invoke_install("m1".into());
+        assert_eq!(hooks::job_generation("m1"), Some(first));
+
+        // Cancel: the job goes, but the worker is still in flight, so the row
+        // shows Cancelling and Install stays refused (no duplicate pak).
         state.invoke_cancel("m1".into());
+        assert_eq!(hooks::job_generation("m1"), None);
+        assert_eq!(row_state(&app), Some(InstallState::Cancelling));
+        state.invoke_install("m1".into());
+        assert_eq!(hooks::job_generation("m1"), None);
+        assert_eq!(hooks::in_flight("m1"), Some(first));
+
+        // Stale progress from the cancelled worker is ignored.
+        hooks::post_progress("m1", first);
+        assert_eq!(hooks::job_generation("m1"), None);
+        assert_eq!(row_state(&app), Some(InstallState::Cancelling));
+        // Its Done (an error) clears the marker without a banner.
+        hooks::post_done_error("m1", first);
+        assert_eq!(hooks::in_flight("m1"), None);
         assert_eq!(row_state(&app), Some(InstallState::Idle));
-        // The cancelled worker still finishes (with an error); nothing may change.
-        assert!(!run_until(&app, Duration::from_millis(1500), |a| {
-            a.global::<BrowseState>().get_banner_text() != ""
-        }));
+        assert_eq!(state.get_banner_text(), "");
+        // Drain the real worker's queued posts: still idle, still no banner.
+        run_until(&app, Duration::from_millis(500), |_| false);
         assert_eq!(row_state(&app), Some(InstallState::Idle));
+        assert_eq!(state.get_banner_text(), "");
 
         state.invoke_install("m1".into());
         let failed = |a: &App| a.global::<BrowseState>().get_banner_text() != "";

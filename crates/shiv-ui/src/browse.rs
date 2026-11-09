@@ -290,6 +290,10 @@ struct Job {
 struct ModList {
     entries: RefCell<Vec<Entry>>,
     jobs: RefCell<HashMap<String, Job>>,
+    /// Mod id -> generation of the worker still running for it. Survives
+    /// Cancel and is cleared only by that worker's `Done`, so Install is
+    /// refused until the previous worker has really stopped.
+    in_flight: RefCell<HashMap<String, u64>>,
     installed: RefCell<HashSet<String>>,
     cache: Arc<thumbs::Cache>,
     loader: ThumbLoader,
@@ -369,6 +373,7 @@ impl Model for ModList {
                 }
                 Phase::Installing => InstallState::Installing,
             },
+            None if self.in_flight.borrow().contains_key(&e.id) => InstallState::Cancelling,
             None if self.installed.borrow().contains(&e.id) => InstallState::Installed,
             None if !e.downloadable => InstallState::Unavailable,
             None => InstallState::Idle,
@@ -456,6 +461,10 @@ fn run_install(
     }
     post(Update::Installing);
     let _guard = INSTALL_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+    // Cancel may have been pressed while waiting for another install.
+    if cancel.load(Ordering::Relaxed) {
+        return Err(Failure::Cancelled);
+    }
     let meta = ModMeta {
         mod_id: task.mod_id,
         name: task.name,
@@ -500,6 +509,7 @@ pub fn attach(app: &App, api_url: &str) {
     let list = Rc::new(ModList {
         entries: RefCell::new(Vec::new()),
         jobs: RefCell::new(HashMap::new()),
+        in_flight: RefCell::new(HashMap::new()),
         installed: RefCell::new(HashSet::new()),
         loader: ThumbLoader::start(cache.clone(), weak.clone()),
         cache,
@@ -555,6 +565,8 @@ impl Browse {
     }
 
     fn load(&self) {
+        // Retry also retries thumbnails that failed while offline.
+        self.list.cache.clear_failed();
         let generation = self.load_generation.get() + 1;
         self.load_generation.set(generation);
         self.with_state(|s| {
@@ -671,7 +683,8 @@ impl Browse {
     }
 
     fn install(&self, id: &str) {
-        if self.list.jobs.borrow().contains_key(id) {
+        if self.list.jobs.borrow().contains_key(id) || self.list.in_flight.borrow().contains_key(id)
+        {
             return;
         }
         let Some((_, entry)) = self.list.find(id) else {
@@ -691,6 +704,10 @@ impl Browse {
                 },
             },
         );
+        self.list
+            .in_flight
+            .borrow_mut()
+            .insert(id.to_owned(), generation);
         self.list.changed(id);
 
         let task = InstallTask {
@@ -727,17 +744,24 @@ impl Browse {
     fn cancel(&self, id: &str) {
         let removed = self.list.jobs.borrow_mut().remove(id);
         if let Some(job) = removed {
-            // The worker notices at its next chunk and deletes the partial
-            // file; its later updates carry a stale generation and are ignored.
+            // The worker notices at its next chunk (or right after taking the
+            // install lock) and deletes the partial file. Its progress updates
+            // are ignored from now on; its `Done` clears `in_flight`.
             job.cancel.store(true, Ordering::Relaxed);
             self.list.changed(id);
         }
     }
 
     fn job_update(&self, id: &str, generation: u64, update: Update) {
-        // A finished install is a fact about the disk even if the job was cancelled late.
-        if let Update::Done(Ok(())) = &update {
-            self.list.installed.borrow_mut().insert(id.to_owned());
+        if let Update::Done(result) = &update {
+            let mut in_flight = self.list.in_flight.borrow_mut();
+            if in_flight.get(id) == Some(&generation) {
+                in_flight.remove(id);
+            }
+            // A finished install is a fact about the disk even if the job was cancelled late.
+            if result.is_ok() {
+                self.list.installed.borrow_mut().insert(id.to_owned());
+            }
         }
         let current = self
             .list
@@ -772,6 +796,48 @@ impl Browse {
             }
         }
         self.list.changed(id);
+    }
+}
+
+/// Hooks for the UI test in `main.rs` (the Slint platform can only be
+/// initialised once per process, so that test drives the controller).
+#[cfg(test)]
+pub(crate) mod test_hooks {
+    use super::*;
+
+    pub fn job_generation(id: &str) -> Option<u64> {
+        let mut out = None;
+        with_browse(|b| out = b.list.jobs.borrow().get(id).map(|j| j.generation));
+        out
+    }
+
+    pub fn in_flight(id: &str) -> Option<u64> {
+        let mut out = None;
+        with_browse(|b| out = b.list.in_flight.borrow().get(id).copied());
+        out
+    }
+
+    pub fn post_progress(id: &str, generation: u64) {
+        with_browse(|b| {
+            b.job_update(
+                id,
+                generation,
+                Update::Progress {
+                    progress: 0.5,
+                    text: "50%".into(),
+                },
+            );
+        });
+    }
+
+    pub fn post_done_error(id: &str, generation: u64) {
+        with_browse(|b| {
+            b.job_update(
+                id,
+                generation,
+                Update::Done(Err(Failure::Message("late failure".into()))),
+            );
+        });
     }
 }
 

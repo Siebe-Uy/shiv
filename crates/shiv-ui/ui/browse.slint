@@ -6,7 +6,9 @@ import { Button, TextButton, SearchField, Dropdown, ProgressBar } from "widgets.
 
 export enum LoadState { loading, ready, failed }
 
-export enum InstallState { idle, downloading, installing, installed, unavailable }
+// `cancelling`: Cancel was pressed and the worker has not finished yet; Install
+// stays disabled until it has, so two workers never install the same mod.
+export enum InstallState { idle, downloading, installing, cancelling, installed, unavailable }
 
 export struct ModRow {
     id: string,
@@ -124,6 +126,12 @@ component ModRowView inherits Rectangle {
             }
             if root.item.state == InstallState.installing: Text {
                 text: "Installing";
+                color: Theme.text-muted;
+                font-size: Theme.text-md;
+                horizontal-alignment: right;
+            }
+            if root.item.state == InstallState.cancelling: Text {
+                text: "Cancelling";
                 color: Theme.text-muted;
                 font-size: Theme.text-md;
                 horizontal-alignment: right;
