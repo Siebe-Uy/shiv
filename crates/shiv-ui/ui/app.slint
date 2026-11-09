@@ -1,0 +1,133 @@
+// Application shell: sidebar navigation over five screens.
+
+import { Theme } from "theme.slint";
+import { BrowsePage, BrowseState, ModRow, LoadState, InstallState } from "browse.slint";
+
+export { BrowseState, ModRow, LoadState, InstallState }
+
+component NavItem inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    callback clicked;
+
+    accessible-role: tab;
+    accessible-label: root.label;
+    accessible-item-selected: root.active;
+    accessible-action-default => { root.clicked(); }
+
+    height: Theme.control-h;
+    border-radius: Theme.radius;
+    background: root.active ? Theme.raised : (ta.has-hover ? Theme.hover : transparent);
+
+    Rectangle {
+        x: 0px;
+        y: Theme.s1;
+        width: 2px;
+        height: parent.height - 2 * Theme.s1;
+        background: Theme.accent;
+        visible: root.active;
+    }
+
+    Text {
+        x: Theme.s2;
+        width: parent.width - 2 * Theme.s2;
+        height: parent.height;
+        text: root.label;
+        color: root.active ? Theme.text : Theme.text-muted;
+        font-size: Theme.text-md;
+        font-weight: root.active ? 600 : 400;
+        vertical-alignment: center;
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+component Placeholder inherits Rectangle {
+    in property <string> title;
+    background: Theme.bg;
+    VerticalLayout {
+        padding: Theme.s3;
+        spacing: Theme.s1;
+        alignment: start;
+        Text {
+            text: root.title;
+            color: Theme.text;
+            font-size: Theme.text-xl;
+            font-weight: 600;
+        }
+        Text {
+            text: "Coming in a later task.";
+            color: Theme.text-muted;
+            font-size: Theme.text-md;
+        }
+    }
+}
+
+export component App inherits Window {
+    title: "Shiv";
+    preferred-width: 1120px;
+    preferred-height: 760px;
+    min-width: 840px;
+    min-height: 520px;
+    background: Theme.bg;
+    default-font-family: Theme.font;
+    default-font-size: Theme.text-md;
+
+    in-out property <int> screen: 0;
+    property <[string]> screens: ["Browse", "Installed", "Crosshair", "Performance", "Repair"];
+
+    HorizontalLayout {
+        Rectangle {
+            width: 200px;
+            background: Theme.sidebar;
+
+            VerticalLayout {
+                padding: Theme.s2;
+                spacing: Theme.s1;
+                alignment: start;
+
+                Text {
+                    height: Theme.s4 + Theme.s1;
+                    text: "Shiv";
+                    color: Theme.text;
+                    font-size: Theme.text-xl;
+                    font-weight: 600;
+                    vertical-alignment: top;
+                }
+
+                for name[i] in root.screens: NavItem {
+                    label: name;
+                    active: root.screen == i;
+                    clicked => { root.screen = i; }
+                }
+            }
+
+            Rectangle {
+                x: parent.width - 1px;
+                width: 1px;
+                background: Theme.border;
+            }
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+
+            // Kept alive while hidden so search text and scroll position survive navigation.
+            BrowsePage {
+                width: parent.width;
+                height: parent.height;
+                visible: root.screen == 0;
+            }
+
+            for name[i] in root.screens: Placeholder {
+                width: parent.width;
+                height: parent.height;
+                visible: i > 0 && root.screen == i;
+                title: name;
+            }
+        }
+    }
+}

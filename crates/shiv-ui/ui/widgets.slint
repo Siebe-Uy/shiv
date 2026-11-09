@@ -1,0 +1,204 @@
+// Small custom controls so every surface follows the theme exactly.
+
+import { ListView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+export component Button inherits Rectangle {
+    in property <string> text;
+    in property <bool> primary: false;
+    callback clicked;
+
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-action-default => { root.clicked(); }
+
+    height: Theme.control-h;
+    min-width: label.preferred-width + 2 * Theme.s2;
+    border-radius: Theme.radius;
+    border-width: root.primary ? 0px : 1px;
+    border-color: ta.has-hover ? Theme.accent : Theme.border;
+    background: root.primary
+        ? (ta.has-hover ? Theme.accent-hover : Theme.accent)
+        : (ta.has-hover ? Theme.hover : transparent);
+
+    label := Text {
+        text: root.text;
+        color: root.primary ? Theme.on-accent : Theme.text;
+        font-size: Theme.text-md;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// Text-only action, for secondary actions that sit inside dense rows.
+export component TextButton inherits Rectangle {
+    in property <string> text;
+    callback clicked;
+
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-action-default => { root.clicked(); }
+
+    height: Theme.control-h;
+    min-width: label.preferred-width + Theme.s2;
+
+    label := Text {
+        text: root.text;
+        color: ta.has-hover ? Theme.text : Theme.text-muted;
+        font-size: Theme.text-sm;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+export component SearchField inherits Rectangle {
+    in property <string> placeholder;
+    callback edited(string);
+
+    height: Theme.control-h;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: input.has-focus ? Theme.accent : Theme.border;
+    background: Theme.raised;
+
+    hint := Text {
+        x: Theme.s2;
+        width: parent.width - 2 * Theme.s2;
+        height: parent.height;
+        text: root.placeholder;
+        visible: input.text == "";
+        color: Theme.text-faint;
+        font-size: Theme.text-md;
+        vertical-alignment: center;
+    }
+
+    input := TextInput {
+        x: Theme.s2;
+        width: parent.width - 2 * Theme.s2;
+        height: parent.height;
+        single-line: true;
+        color: Theme.text;
+        font-size: Theme.text-md;
+        vertical-alignment: center;
+        selection-background-color: Theme.accent.with-alpha(0.35);
+        selection-foreground-color: Theme.text;
+        accessible-label: root.placeholder;
+        edited => { root.edited(self.text); }
+    }
+}
+
+export component Dropdown inherits Rectangle {
+    in property <[string]> options;
+    in-out property <int> current-index: 0;
+    in property <string> label;
+    callback selected(int);
+
+    accessible-role: combobox;
+    accessible-label: root.label;
+    accessible-value: root.options[root.current-index];
+
+    height: Theme.control-h;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: ta.has-hover ? Theme.hover : Theme.raised;
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { popup.show(); }
+    }
+
+    Text {
+        x: Theme.s2;
+        width: parent.width - 2 * Theme.s2 - Theme.s2;
+        height: parent.height;
+        text: root.options[root.current-index];
+        color: Theme.text;
+        font-size: Theme.text-md;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    // Chevron.
+    Path {
+        x: parent.width - Theme.s2 - 8px;
+        y: (parent.height - 4px) / 2;
+        width: 8px;
+        height: 4px;
+        viewbox-width: 8;
+        viewbox-height: 4;
+        commands: "M 0 0 L 4 4 L 8 0";
+        stroke: Theme.text-muted;
+        stroke-width: 1.5px;
+    }
+
+    popup := PopupWindow {
+        x: 0px;
+        y: root.height + Theme.s1;
+        width: root.width;
+        height: min(root.options.length * Theme.control-h + Theme.s2, 320px);
+
+        Rectangle {
+            background: Theme.raised;
+            border-radius: Theme.radius;
+            border-width: 1px;
+            border-color: Theme.border;
+
+            ListView {
+                x: 1px;
+                y: Theme.s1;
+                width: parent.width - 2px;
+                height: parent.height - Theme.s2;
+                for option[i] in root.options: Rectangle {
+                    height: Theme.control-h;
+                    background: ota.has-hover ? Theme.hover : transparent;
+                    Text {
+                        x: Theme.s2;
+                        width: parent.width - 2 * Theme.s2;
+                        height: parent.height;
+                        text: option;
+                        color: i == root.current-index ? Theme.accent : Theme.text;
+                        font-size: Theme.text-md;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    ota := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.current-index = i;
+                            root.selected(i);
+                            popup.close();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+export component ProgressBar inherits Rectangle {
+    // 0..1; negative means unknown total.
+    in property <float> progress;
+    height: 4px;
+    border-radius: 2px;
+    background: Theme.border;
+    Rectangle {
+        x: 0px;
+        width: root.progress < 0 ? 0px : parent.width * clamp(root.progress, 0, 1);
+        height: parent.height;
+        border-radius: 2px;
+        background: Theme.accent;
+    }
+}

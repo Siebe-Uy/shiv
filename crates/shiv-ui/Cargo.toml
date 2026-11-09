@@ -7,3 +7,27 @@ license = "GPL-3.0"
 [[bin]]
 name = "shiv_ui"
 path = "src/main.rs"
+
+[dependencies]
+shiv-api = { path = "../shiv-api" }
+shiv-core = { path = "../shiv-core" }
+# Software renderer only (docs/toolkit.md): no GPU stack is linked, so the
+# winit backend picks it without SLINT_BACKEND.
+slint = { version = "1.18.1", default-features = false, features = [
+    "std",
+    "compat-1-2",
+    "backend-winit",
+    "backend-winit-wayland",
+    "renderer-software",
+] }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
+ureq = { version = "3.5.1", default-features = false, features = ["rustls"] }
+tempfile = "3.27.0"
+
+[build-dependencies]
+slint-build = "1.18.1"
+
+[dev-dependencies]
+# Headless Slint platform for driving the UI in tests (same version as slint).
+i-slint-backend-testing = { version = "=1.18.1", default-features = false }
+tiny_http = "0.12.0"

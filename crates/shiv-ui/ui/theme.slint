@@ -1,0 +1,36 @@
+// Design tokens. One accent, one typeface, an 8 px spacing grid.
+// Dark neutral surfaces, no gradients, no glow, no decorative shadows.
+
+export global Theme {
+    // Surfaces, darkest to lightest.
+    out property <color> bg: #111214;
+    out property <color> sidebar: #16171a;
+    out property <color> raised: #1d1f23;
+    out property <color> hover: #23262b;
+    out property <color> border: #2a2d33;
+
+    // Text.
+    out property <color> text: #e6e6e8;
+    out property <color> text-muted: #8c8f96;
+    out property <color> text-faint: #5d6067;
+
+    // The single accent (muted brass) and the text that sits on it.
+    out property <color> accent: #c9a86a;
+    out property <color> accent-hover: #d6b77c;
+    out property <color> on-accent: #15130e;
+
+    // Typography. One family; sizes are free, spacing is not.
+    out property <string> font: "Adwaita Sans";
+    out property <length> text-sm: 12px;
+    out property <length> text-md: 14px;
+    out property <length> text-lg: 15px;
+    out property <length> text-xl: 20px;
+
+    // Spacing grid.
+    out property <length> s1: 8px;
+    out property <length> s2: 16px;
+    out property <length> s3: 24px;
+    out property <length> s4: 32px;
+    out property <length> control-h: 32px;
+    out property <length> radius: 4px;
+}
