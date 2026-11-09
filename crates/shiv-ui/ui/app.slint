@@ -99,16 +99,15 @@ export component App inherits Window {
                 alignment: start;
 
                 Rectangle {
-                    height: Theme.s4 + Theme.s1;
+                    height: Theme.s4 * 2;
 
                     Image {
                         x: 0px;
-                        y: 0px;
-                        width: 54px;
-                        height: Theme.s3;
+                        y: (parent.height - self.height) / 2;
+                        width: parent.width;
+                        height: Theme.s4 + Theme.s1;
                         source: @image-url("assets/shiv-wordmark.svg");
                         image-fit: contain;
-                        horizontal-alignment: left;
                     }
                 }
 
