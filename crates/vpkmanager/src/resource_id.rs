@@ -47,14 +47,13 @@ fn mix(value: u32) -> u32 {
 fn murmur_hash64b(bytes: &[u8], length: u32) -> u64 {
     let mut high = SEED ^ length;
     let mut low = 0u32;
-    let mut chunks = bytes.chunks_exact(8);
-    for chunk in &mut chunks {
+    let (chunks, mut tail) = bytes.as_chunks::<8>();
+    for chunk in chunks {
         let first = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         let second = u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
         high = high.wrapping_mul(MULTIPLIER) ^ mix(first);
         low = low.wrapping_mul(MULTIPLIER) ^ mix(second);
     }
-    let mut tail = chunks.remainder();
     if tail.len() >= 4 {
         high = high.wrapping_mul(MULTIPLIER)
             ^ mix(u32::from_le_bytes([tail[0], tail[1], tail[2], tail[3]]));

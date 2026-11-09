@@ -599,7 +599,9 @@ mod tests {
             let swatch = pattern_swatch(Pattern::new(style, 1.0, 0.2), 16);
             assert_eq!(swatch.len(), 16 * 16 * 4);
             let unique = swatch
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|px| px[0])
                 .collect::<std::collections::BTreeSet<_>>();
             assert!(unique.len() > 1, "{style:?} produced a flat swatch");
@@ -611,7 +613,9 @@ mod tests {
         for style in ALL {
             let swatch = pattern_swatch(Pattern::new(style, 1.0, 0.3), 48);
             let levels = swatch
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|px| u16::from(px[0]) + u16::from(px[1]) + u16::from(px[2]))
                 .collect::<Vec<_>>();
             let min = *levels.iter().min().unwrap();

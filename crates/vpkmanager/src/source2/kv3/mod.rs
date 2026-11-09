@@ -135,7 +135,6 @@ pub fn encode(value: &Value, format: &Format) -> Vec<u8> {
 }
 
 /// Encode a value tree while retaining flags, numeric widths, and typed arrays.
-#[must_use]
 pub fn encode_preserving(
     value: &Value,
     encoding: &Encoding,

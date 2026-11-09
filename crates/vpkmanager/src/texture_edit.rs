@@ -113,7 +113,7 @@ fn set_color(rgb: [u8; 3], recolor: Recolor) -> [u8; 3] {
 fn map_pixels(image: &mut Image, transform: impl Fn([u8; 3]) -> [u8; 3]) -> Result<()> {
     match &mut image.data {
         ImageData::Rgba8(buffer) => {
-            for px in buffer.chunks_exact_mut(4) {
+            for px in buffer.as_chunks_mut::<4>().0 {
                 let [r, g, b] = transform([px[0], px[1], px[2]]);
                 px[0] = r;
                 px[1] = g;

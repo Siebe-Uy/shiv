@@ -99,7 +99,7 @@ pub fn encode_bc4(image: &Image) -> Result<Vec<u8>, EncodeError> {
     // BC4 takes one channel. Extract red.
     let pixel_count = (pw as usize) * (ph as usize);
     let mut r = Vec::with_capacity(pixel_count);
-    for px in data.chunks_exact(4) {
+    for px in data.as_chunks::<4>().0 {
         r.push(px[0]);
     }
     let surface = RSurface {
@@ -120,7 +120,7 @@ pub fn encode_bc5(image: &Image) -> Result<Vec<u8>, EncodeError> {
     // BC5 takes two channels. Extract red + green into interleaved RG.
     let pixel_count = (pw as usize) * (ph as usize);
     let mut rg = Vec::with_capacity(pixel_count * 2);
-    for px in data.chunks_exact(4) {
+    for px in data.as_chunks::<4>().0 {
         rg.push(px[0]);
         rg.push(px[1]);
     }
@@ -143,7 +143,7 @@ pub fn encode_bc7(image: &Image) -> Result<Vec<u8>, EncodeError> {
     // BC7's alpha modes cost far more to search than its opaque ones, and most
     // hero color maps are fully opaque. Checking a byte per pixel is nothing
     // against the block search it saves.
-    let opaque = data.chunks_exact(4).all(|px| px[3] == 255);
+    let opaque = data.as_chunks::<4>().0.iter().all(|px| px[3] == 255);
     // `fast` over `basic`: these are re-encodes of pixels a recolor has already
     // altered on purpose, so spending the extra search time chasing the last
     // fraction of fidelity to an image that is itself a lossy edit is a poor

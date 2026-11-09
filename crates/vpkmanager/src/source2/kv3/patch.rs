@@ -507,12 +507,12 @@ pub fn insert_array_element_adding(
     let strings = lanes(&with_strings, version)?.strings;
     let root_type = value_wire_type(value);
     let include_root_type = site.subtype.is_none();
-    if let Some(subtype) = site.subtype {
-        if root_type != subtype {
-            return Err(DecodeError::Kv3(
-                "inserted value type does not match target typed-array subtype",
-            ));
-        }
+    if let Some(subtype) = site.subtype
+        && root_type != subtype
+    {
+        return Err(DecodeError::Kv3(
+            "inserted value type does not match target typed-array subtype",
+        ));
     }
     let encoded = encode_insert_value(value, version, &strings, include_root_type)?;
 
@@ -642,12 +642,12 @@ fn insert_array_element_blob_aware(
     let strings = lanes(&with_strings, 5)?.strings;
     let root_type = value_wire_type(value);
     let include_root_type = site.subtype.is_none();
-    if let Some(subtype) = site.subtype {
-        if root_type != subtype {
-            return Err(DecodeError::Kv3(
-                "inserted value type does not match target typed-array subtype",
-            ));
-        }
+    if let Some(subtype) = site.subtype
+        && root_type != subtype
+    {
+        return Err(DecodeError::Kv3(
+            "inserted value type does not match target typed-array subtype",
+        ));
     }
     let encoded = encode_insert_value(value, 5, &strings, include_root_type)?;
     let rebuilt = rebuild_v5_with_insert(&with_strings, &site, &encoded)?;
@@ -703,11 +703,15 @@ fn finalize_blob_block(
         .ok_or(DecodeError::Kv3("blob frame table out of range"))?;
 
     let old_lengths: Vec<usize> = lengths_region
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)
         .collect();
     let old_frame_sizes: Vec<usize> = old_table
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|b| usize::from(u16::from_le_bytes([b[0], b[1]])))
         .collect();
     if blob_index > old_lengths.len() {
@@ -800,12 +804,11 @@ fn finalize_blob_block(
             } else {
                 HEADER + i32_at(orig, 76).unwrap_or(0) as usize
             };
-            if let Some(oc) = orig.get(start..start + ocomp) {
-                if let Ok(orig_raw) = lz4_flex::block::decompress(oc, ounc) {
-                    if orig_raw == raw {
-                        return oc.to_vec();
-                    }
-                }
+            if let Some(oc) = orig.get(start..start + ocomp)
+                && let Ok(orig_raw) = lz4_flex::block::decompress(oc, ounc)
+                && orig_raw == raw
+            {
+                return oc.to_vec();
             }
         }
         lz4_flex::block::compress(raw)

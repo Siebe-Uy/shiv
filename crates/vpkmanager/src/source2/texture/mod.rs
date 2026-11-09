@@ -218,10 +218,10 @@ pub(crate) fn detect_ycocg(resource: &crate::source2::resource::Resource) -> boo
         };
         // Structured path: RED2 is KV3. Look for a SpecialDependencies entry whose
         // m_String carries the YCoCg marker.
-        if let Ok(value) = crate::source2::kv3::decode(block) {
-            if special_dependency_has(&value, "YCoCg Conversion") {
-                return true;
-            }
+        if let Ok(value) = crate::source2::kv3::decode(block)
+            && special_dependency_has(&value, "YCoCg Conversion")
+        {
+            return true;
         }
         // Fallback: the marker string is specific enough that a raw scan of the
         // edit-info block is a safe backstop (legacy REDI, or a KV3 parse miss).
@@ -269,7 +269,7 @@ pub(crate) fn apply_ycocg(image: &mut Image) {
     let ImageData::Rgba8(px) = &mut image.data else {
         return;
     };
-    for p in px.chunks_exact_mut(4) {
+    for p in px.as_chunks_mut::<4>().0 {
         let scale = (i32::from(p[2]) >> 3) + 1;
         let co = (i32::from(p[0]) - 128) / scale;
         let cg = (i32::from(p[1]) - 128) / scale;
