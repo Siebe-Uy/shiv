@@ -757,6 +757,8 @@ impl Browse {
 
     fn job_update(&self, id: &str, generation: u64, update: Update) {
         if let Update::Done(result) = &update {
+            // The disk may have changed: keep the Launch sidebar count current.
+            crate::launch::refresh();
             let mut in_flight = self.list.in_flight.borrow_mut();
             if in_flight.get(id) == Some(&generation) {
                 in_flight.remove(id);

@@ -258,6 +258,50 @@ fn unparsable_gameinfo_reports_missing_search_path() {
     assert_eq!(kinds(&game.check()), vec![FindingKind::MissingSearchPath]);
 }
 
+/// The check opens a writable gameinfo.gi for writing (to probe permissions)
+/// but must leave it exactly as it was: same bytes, length and mtime.
+#[test]
+fn writable_gameinfo_is_left_untouched() {
+    let game = Game::new();
+    // Back-date the mtime so a write during the check could not land in the
+    // same timestamp tick.
+    let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000);
+    fs::File::options()
+        .write(true)
+        .open(&game.paths.gameinfo)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    let before = fs::metadata(&game.paths.gameinfo).unwrap();
+    assert!(!before.permissions().readonly());
+    let findings = game.check();
+    assert!(findings.is_empty(), "{findings:#?}");
+    let after = fs::metadata(&game.paths.gameinfo).unwrap();
+    assert_eq!(
+        fs::read(&game.paths.gameinfo).unwrap(),
+        GAMEINFO_OK.as_bytes()
+    );
+    assert_eq!(after.len(), before.len());
+    assert_eq!(after.modified().unwrap(), old);
+    assert_eq!(after.modified().unwrap(), before.modified().unwrap());
+}
+
+/// A header claiming a 4 GiB directory on a tiny file is reported as
+/// truncated from the header alone (vpk-parser's own test checks allocation).
+#[test]
+fn huge_declared_tree_is_truncated() {
+    let game = Game::new();
+    let mut bytes = vpk_bytes();
+    bytes[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
+    game.put("pak01_dir.vpk", &bytes);
+    let findings = game.check();
+    assert_eq!(
+        kinds(&findings),
+        vec![FindingKind::TruncatedVpk],
+        "{findings:#?}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn gameinfo_unwritable_is_reported() {
@@ -265,12 +309,14 @@ fn gameinfo_unwritable_is_reported() {
     let game = Game::new();
     fs::set_permissions(&game.paths.gameinfo, fs::Permissions::from_mode(0o444)).unwrap();
     let findings = game.check();
-    // Root can write anyway; the check is meaningless there.
+    // Root can write anyway; the check is meaningless there (the writable
+    // path is covered by `writable_gameinfo_is_left_untouched`).
     if fs::OpenOptions::new()
         .write(true)
         .open(&game.paths.gameinfo)
         .is_ok()
     {
+        eprintln!("skipped: 0444 does not stop this user (root?) from writing");
         return;
     }
     assert_eq!(

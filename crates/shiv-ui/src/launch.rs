@@ -107,18 +107,30 @@ pub(crate) fn problems_short(n: usize) -> String {
 // ---------------------------------------------------------------------------
 // Controller
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 enum Purpose {
-    Startup,
+    /// App start, screen changes and finished installs: updates the sidebar
+    /// quietly (no busy state) and never opens the dialog or launches.
+    Background,
+    /// Launch click: launch if clean, otherwise show the findings.
     Launch,
+    /// Launch anyway on findings the user saw earlier (via Review): launch
+    /// only if the disk still shows exactly those, otherwise show the new ones.
+    Confirm(Vec<Finding>),
 }
 
 struct Launch {
     weak: Weak<App>,
     deps: Deps,
     rows: Rc<VecModel<FindingRow>>,
-    /// Where the last check ran; Launch anyway launches that install.
-    paths: RefCell<Option<GamePaths>>,
+    /// Result of the last check: where it ran and what it found.
+    last: RefCell<Option<(GamePaths, Vec<Finding>)>>,
+    /// The open dialog shows the result of the check that the Launch click
+    /// itself ran, so Launch anyway needs no re-check.
+    fresh_dialog: Cell<bool>,
+    /// The status line holds a check error (cleared by the next good check),
+    /// not a launch result.
+    status_from_check: Cell<bool>,
     generation: Cell<u64>,
 }
 
@@ -133,7 +145,9 @@ pub(crate) fn attach_with(app: &App, deps: Deps) {
         weak: app.as_weak(),
         deps,
         rows: rows.clone(),
-        paths: RefCell::new(None),
+        last: RefCell::new(None),
+        fresh_dialog: Cell::new(false),
+        status_from_check: Cell::new(false),
         generation: Cell::new(0),
     });
     LAUNCH.with(|c| *c.borrow_mut() = Some(controller));
@@ -145,11 +159,28 @@ pub(crate) fn attach_with(app: &App, deps: Deps) {
     state.on_review(|| {
         with_launch(|l| {
             if l.rows.row_count() > 0 {
+                l.fresh_dialog.set(false);
                 l.with_state(|s| s.set_dialog_open(true));
             }
         });
     });
-    with_launch(|l| l.check(Purpose::Startup));
+    state.on_refresh(refresh);
+    with_launch(|l| l.check(Purpose::Background));
+}
+
+/// Re-check quietly so the sidebar count follows the disk: called on screen
+/// changes and when an install, toggle or uninstall finishes. Skipped while a
+/// Launch is in progress or the dialog is open (its list stays put).
+pub(crate) fn refresh() {
+    with_launch(|l| {
+        let dialog = l
+            .weak
+            .upgrade()
+            .is_some_and(|a| a.global::<LaunchState>().get_dialog_open());
+        if !l.busy() && !dialog {
+            l.check(Purpose::Background);
+        }
+    });
 }
 
 fn spawn(name: &str, f: impl FnOnce() + Send + 'static) -> bool {
@@ -172,6 +203,7 @@ impl Launch {
         g
     }
 
+    /// A Launch (check or launch) is in progress.
     fn busy(&self) -> bool {
         self.weak
             .upgrade()
@@ -184,14 +216,17 @@ impl Launch {
         }
     }
 
+    /// Supersedes any check in flight (a Launch click overrides a background check).
     fn check(&self, purpose: Purpose) {
         let generation = self.next_generation();
-        self.with_state(|s| {
-            s.set_busy(true);
-            s.set_busy_text("Checking game files".into());
-            s.set_status_text("".into());
-            s.set_status_error(false);
-        });
+        if purpose != Purpose::Background {
+            self.with_state(|s| {
+                s.set_busy(true);
+                s.set_busy_text("Checking game files".into());
+                s.set_status_text("".into());
+                s.set_status_error(false);
+            });
+        }
         let deps = self.deps.clone();
         let weak = self.weak.clone();
         let started = spawn("shiv-health", move || {
@@ -203,6 +238,7 @@ impl Launch {
             });
         });
         if !started {
+            self.status_from_check.set(true);
             self.finish(Err("Could not start a background thread.".into()));
         }
     }
@@ -220,6 +256,8 @@ impl Launch {
             Ok(r) => r,
             Err(text) => {
                 self.rows.set_vec(Vec::new());
+                *self.last.borrow_mut() = None;
+                self.status_from_check.set(true);
                 return self.finish(Err(text));
             }
         };
@@ -228,23 +266,33 @@ impl Launch {
             s.set_busy(false);
             s.set_problems_text(problems_text(findings.len()).into());
             s.set_problems_short(problems_short(findings.len()).into());
-        });
-        *self.paths.borrow_mut() = Some(paths.clone());
-        // Debug builds only: open the review dialog for startup findings (for
-        // screenshots); it never launches anything.
-        #[cfg(debug_assertions)]
-        if purpose == Purpose::Startup
-            && !findings.is_empty()
-            && std::env::var_os("SHIV_REVIEW").is_some_and(|v| !v.is_empty())
-        {
-            self.with_state(|s| s.set_dialog_open(true));
-        }
-        if purpose == Purpose::Launch {
-            if findings.is_empty() {
-                self.start_launch(paths);
-            } else {
-                self.with_state(|s| s.set_dialog_open(true));
+            if self.status_from_check.replace(false) {
+                s.set_status_text("".into());
+                s.set_status_error(false);
             }
+        });
+        *self.last.borrow_mut() = Some((paths.clone(), findings.clone()));
+        let launch_now = match &purpose {
+            Purpose::Background => {
+                // Debug builds only: open the review dialog for startup findings
+                // (for screenshots); it never launches anything.
+                #[cfg(debug_assertions)]
+                if !findings.is_empty()
+                    && std::env::var_os("SHIV_REVIEW").is_some_and(|v| !v.is_empty())
+                {
+                    self.fresh_dialog.set(false);
+                    self.with_state(|s| s.set_dialog_open(true));
+                }
+                return;
+            }
+            Purpose::Launch => findings.is_empty(),
+            Purpose::Confirm(seen) => findings.is_empty() || *seen == findings,
+        };
+        if launch_now {
+            self.start_launch(paths);
+        } else {
+            self.fresh_dialog.set(true);
+            self.with_state(|s| s.set_dialog_open(true));
         }
     }
 
@@ -253,9 +301,15 @@ impl Launch {
         if self.busy() {
             return;
         }
-        let paths = self.paths.borrow().clone();
-        if let Some(paths) = paths {
+        let last = self.last.borrow().clone();
+        let Some((paths, findings)) = last else {
+            return;
+        };
+        if self.fresh_dialog.get() {
             self.start_launch(paths);
+        } else {
+            // Opened via Review: those findings may be stale.
+            self.check(Purpose::Confirm(findings));
         }
     }
 

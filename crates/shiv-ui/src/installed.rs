@@ -443,6 +443,8 @@ impl Installed {
     /// Success or failure, re-read the folder: that also refreshes the
     /// game-running state (a game-running refusal means it just started).
     fn acted(&self, result: Result<(), String>) {
+        // The disk changed: keep the Launch sidebar count current.
+        crate::launch::refresh();
         // `busy` stays set; the refresh below clears it when the list is current.
         self.with_state(|s| {
             if let Err(text) = &result {

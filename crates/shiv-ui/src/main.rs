@@ -112,13 +112,15 @@ mod tests {
     }
 
     /// Launch against a temp install with a fake launcher (Steam is never
-    /// started): the startup check reports problems, Launch shows the dialog,
-    /// Cancel launches nothing, Launch anyway does, and a clean install
-    /// launches at once without the dialog.
+    /// started): the startup check fills the sidebar quietly; Launch shows the
+    /// dialog; Cancel launches nothing; Launch anyway after Review re-checks
+    /// and shows changed findings instead of launching; screen changes refresh
+    /// the count; a clean install launches at once; an opener failure shows.
     fn launch_flow() {
         use shiv_core::game::GamePaths;
+        use shiv_core::launch::LaunchError;
         use std::sync::Arc;
-        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
         let root = tempfile::tempdir().expect("tempdir");
         let paths = GamePaths::from_root(root.path().to_path_buf());
@@ -129,10 +131,12 @@ mod tests {
         )
         .expect("gameinfo");
         let bad = paths.addons.join("pak01_dir.vpk");
+        let bad2 = paths.addons.join("pak02_dir.vpk");
         std::fs::write(&bad, b"").expect("zero-byte vpk");
 
         let launches = Arc::new(AtomicUsize::new(0));
-        let counter = launches.clone();
+        let fail = Arc::new(AtomicBool::new(false));
+        let (counter, failing) = (launches.clone(), fail.clone());
         let located = paths.clone();
         let app = App::new().expect("app");
         launch::attach_with(
@@ -141,6 +145,12 @@ mod tests {
                 locate: Arc::new(move || Ok(located.clone())),
                 check: Arc::new(shiv_core::health::check),
                 launch: Arc::new(move |_| {
+                    if failing.load(Ordering::SeqCst) {
+                        return Err(LaunchError::OpenerFailed {
+                            program: "xdg-open".into(),
+                            status: "exit status: 4".into(),
+                        });
+                    }
                     counter.fetch_add(1, Ordering::SeqCst);
                     Ok(())
                 }),
@@ -148,20 +158,28 @@ mod tests {
         );
         app.show().expect("show");
         let state = app.global::<LaunchState>();
-        let idle = |a: &App| !a.global::<LaunchState>().get_busy();
+        let count = |n: usize| {
+            move |a: &App| {
+                let s = a.global::<LaunchState>();
+                !s.get_busy() && s.get_findings().row_count() == n
+            }
+        };
+        let launched = |n: usize| {
+            let l = launches.clone();
+            move |a: &App| !a.global::<LaunchState>().get_busy() && l.load(Ordering::SeqCst) == n
+        };
+        let dialog = |a: &App| a.global::<LaunchState>().get_dialog_open();
 
-        // Startup check: findings shown in the sidebar, no dialog, no launch.
-        assert!(run_until(&app, Duration::from_secs(20), idle));
-        assert_eq!(state.get_findings().row_count(), 1);
-        assert_eq!(state.get_problems_text().as_str(), "1 problem found");
+        // Startup check: quiet (no busy state), sidebar count, no dialog, no launch.
+        assert!(!state.get_busy());
+        assert!(run_until(&app, Duration::from_secs(20), count(1)));
+        assert_eq!(state.get_problems_short().as_str(), "1 problem");
         assert!(!state.get_dialog_open());
         assert_eq!(launches.load(Ordering::SeqCst), 0);
 
-        // Launch: re-checks, then asks.
+        // Launch: re-checks, then asks. Cancel launches nothing.
         click(&app, "Launch");
-        assert!(run_until(&app, Duration::from_secs(20), |a| a
-            .global::<LaunchState>()
-            .get_dialog_open()));
+        assert!(run_until(&app, Duration::from_secs(20), dialog));
         let row = state.get_findings().row_data(0).expect("row");
         assert_eq!(row.title.as_str(), "Empty VPK");
         assert_eq!(row.file.as_str(), "addons/pak01_dir.vpk");
@@ -170,26 +188,52 @@ mod tests {
         run_until(&app, Duration::from_millis(200), |_| false);
         assert_eq!(launches.load(Ordering::SeqCst), 0);
 
-        // Review reopens it; Launch anyway launches.
+        // Review shows the earlier result; the disk changes meanwhile, so
+        // Launch anyway re-checks and shows the new findings instead.
         click(&app, "Review");
         assert!(state.get_dialog_open());
+        std::fs::write(&bad2, b"").expect("second zero-byte vpk");
         click(&app, "Launch anyway");
-        assert!(!state.get_dialog_open());
-        assert!(run_until(&app, Duration::from_secs(20), idle));
-        assert_eq!(launches.load(Ordering::SeqCst), 1);
-        assert!(!state.get_status_error());
+        assert!(run_until(&app, Duration::from_secs(20), move |a| dialog(a)
+            && a.global::<LaunchState>().get_findings().row_count() == 2));
+        assert_eq!(launches.load(Ordering::SeqCst), 0);
+        // These findings are fresh: Launch anyway launches directly.
+        click(&app, "Launch anyway");
+        assert!(run_until(&app, Duration::from_secs(20), launched(1)));
         assert!(state.get_status_text().contains("starting"));
 
-        // Clean install: Launch goes straight through.
+        // Review with unchanged findings: the re-check matches, so it launches.
+        click(&app, "Review");
+        click(&app, "Launch anyway");
+        assert!(run_until(&app, Duration::from_secs(20), launched(2)));
+        assert!(!state.get_dialog_open());
+
+        // Fixing the files elsewhere: a screen change refreshes the count.
         std::fs::remove_file(&bad).expect("remove");
+        std::fs::remove_file(&bad2).expect("remove");
+        app.set_screen(2);
+        assert!(run_until(&app, Duration::from_secs(20), count(0)));
+
+        // Clean: Launch goes straight through.
+        click(&app, "Launch");
+        assert!(run_until(&app, Duration::from_secs(20), launched(3)));
+        assert!(!state.get_dialog_open());
+
+        // The opener refusing the link is shown as an error.
+        fail.store(true, Ordering::SeqCst);
         click(&app, "Launch");
         assert!(run_until(&app, Duration::from_secs(20), |a| {
-            !a.global::<LaunchState>().get_busy()
-                && a.global::<LaunchState>().get_status_text() != ""
+            let s = a.global::<LaunchState>();
+            !s.get_busy() && s.get_status_error()
         }));
-        assert!(!state.get_dialog_open());
-        assert_eq!(state.get_findings().row_count(), 0);
-        assert_eq!(launches.load(Ordering::SeqCst), 2);
+        assert!(
+            state
+                .get_status_text()
+                .contains("could not open the Steam link"),
+            "{}",
+            state.get_status_text()
+        );
+        assert_eq!(launches.load(Ordering::SeqCst), 3);
     }
 
     /// Installed screen against a temp addons dir (never the real one):

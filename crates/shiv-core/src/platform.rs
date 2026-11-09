@@ -86,3 +86,16 @@ pub fn uri_opener() -> (&'static str, &'static [&'static str]) {
 pub fn uri_opener() -> (&'static str, &'static [&'static str]) {
     ("xdg-open", &[])
 }
+
+/// Whether a non-zero exit from [`uri_opener`] means the URI was not opened.
+/// `explorer.exe` returns 1 even on success, so Windows ignores it.
+#[cfg(windows)]
+pub fn opener_exit_status_is_meaningful() -> bool {
+    false
+}
+
+/// Whether a non-zero exit from [`uri_opener`] means the URI was not opened.
+#[cfg(not(windows))]
+pub fn opener_exit_status_is_meaningful() -> bool {
+    true
+}
