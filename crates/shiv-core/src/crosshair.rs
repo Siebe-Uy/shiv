@@ -219,72 +219,125 @@ fn read_text(path: &Path) -> Result<Option<String>, CrosshairError> {
     }
 }
 
-/// The lines inside the first block with these markers.
-fn section_body<'a>(lines: &[&'a str], (start, end): (&str, &str)) -> Option<Vec<&'a str>> {
-    let from = lines.iter().position(|l| l.trim() == start)?;
-    Some(
-        lines[from + 1..]
+const BOM: char = '\u{feff}';
+
+/// A line's text for marker matching: no terminator, no surrounding space.
+fn marker_text(line: &str) -> &str {
+    line.trim()
+}
+
+/// Which managed section (index into `SECTIONS`) `line` starts, if any.
+fn start_of(line: &str) -> Option<usize> {
+    SECTIONS
+        .iter()
+        .position(|(start, _)| marker_text(line) == *start)
+}
+
+/// Managed blocks in `lines`, as `(section, first, last)` line indices, and
+/// orphan start markers. A block is a start marker followed by its own end
+/// marker with no other start marker in between; anything else is an orphan
+/// start line, so a lone marker never claims the user's lines after it.
+fn find_blocks(lines: &[&str]) -> (Vec<(usize, usize, usize)>, Vec<usize>) {
+    let mut blocks = Vec::new();
+    let mut orphans = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let Some(section) = start_of(lines[i]) else {
+            i += 1;
+            continue;
+        };
+        let end = SECTIONS[section].1;
+        let close = lines[i + 1..]
             .iter()
-            .take_while(|l| l.trim() != end)
-            .copied()
-            .collect(),
-    )
+            .enumerate()
+            .find(|(_, l)| start_of(l).is_some() || marker_text(l) == end)
+            .filter(|(_, l)| marker_text(l) == end)
+            .map(|(k, _)| i + 1 + k);
+        match close {
+            Some(j) => {
+                blocks.push((section, i, j));
+                i = j + 1;
+            }
+            None => {
+                orphans.push(i);
+                i += 1;
+            }
+        }
+    }
+    (blocks, orphans)
 }
 
 /// The crosshair in `autoexec.cfg`'s managed block (Shiv's, or the old app's
-/// when Shiv has not written one). `None` for no file or no block.
+/// when Shiv has not written one). `None` for no file or no complete block.
 pub fn load(paths: &GamePaths) -> Result<Option<CrosshairConfig>, CrosshairError> {
     let Some(text) = read_text(&paths.autoexec)? else {
         return Ok(None);
     };
+    let text = text.strip_prefix(BOM).unwrap_or(&text);
     let lines: Vec<&str> = text.lines().collect();
-    Ok(SECTIONS
-        .iter()
-        .find_map(|&s| section_body(&lines, s))
-        .and_then(|body| parse(&body.join("\n"))))
+    let (blocks, _) = find_blocks(&lines);
+    Ok((0..SECTIONS.len())
+        .find_map(|s| blocks.iter().find(|b| b.0 == s))
+        .and_then(|&(_, first, last)| parse(&lines[first + 1..last].join("\n"))))
 }
 
-/// Replace every managed block (Shiv's and the old app's) in `text` with one
-/// block for `c`, placed where the first one was, or appended at the end.
-/// A start marker without an end marker runs to the end of the file.
+/// The file's usual line ending: CRLF when most lines end in it, else LF.
+fn dominant_eol(text: &str) -> &'static str {
+    let crlf = text.matches("\r\n").count();
+    let lf = text.matches('\n').count() - crlf;
+    if crlf > lf { "\r\n" } else { "\n" }
+}
+
+/// Put one block for `c` in place of the first complete managed block
+/// (Shiv's or the old app's), drop the other blocks and orphan start
+/// markers, or append the block when there is none. Every other line keeps
+/// its bytes and its own line ending; the new block uses the file's dominant
+/// ending. A leading BOM is kept.
 fn rewrite(text: &str, c: &CrosshairConfig) -> String {
-    let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
-    let block = [
-        SECTION_START.to_owned(),
-        to_commands(c),
-        SECTION_END.to_owned(),
-    ];
-    let mut out: Vec<String> = Vec::new();
-    let mut inserted = false;
-    let mut inside: Option<&str> = None;
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if let Some(end) = inside {
-            if trimmed == end {
-                inside = None;
+    let (bom, body) = match text.strip_prefix(BOM) {
+        Some(rest) => (BOM.to_string(), rest),
+        None => (String::new(), text),
+    };
+    let eol = dominant_eol(body);
+    let segments: Vec<&str> = body.split_inclusive('\n').collect();
+    let (blocks, orphans) = find_blocks(&segments);
+    let block = |last_terminator: &str| {
+        format!(
+            "{SECTION_START}{eol}{}{eol}{SECTION_END}{last_terminator}",
+            to_commands(c)
+        )
+    };
+    let mut out = bom;
+    let mut replaced = false;
+    let mut i = 0;
+    while i < segments.len() {
+        if let Some(&(_, _, last)) = blocks.iter().find(|b| b.1 == i) {
+            if !replaced {
+                let terminator =
+                    &segments[last][segments[last].trim_end_matches(['\r', '\n']).len()..];
+                out.push_str(&block(terminator));
+                replaced = true;
             }
+            i = last + 1;
             continue;
         }
-        if let Some(&(_, end)) = SECTIONS.iter().find(|(start, _)| trimmed == *start) {
-            inside = Some(end);
-            if !inserted {
-                out.extend(block.iter().cloned());
-                inserted = true;
-            }
-            continue;
+        if !orphans.contains(&i) {
+            out.push_str(segments[i]);
         }
-        out.push(line.to_owned());
+        i += 1;
     }
-    if !inserted {
-        out.extend(block);
+    if !replaced {
+        if !out.is_empty() && !out.ends_with('\n') && out != "\u{feff}" {
+            out.push_str(eol);
+        }
+        out.push_str(&block(eol));
     }
-    let mut joined = out.join(eol);
-    joined.push_str(eol);
-    joined
+    out
 }
 
 /// Write `contents` to `path` through a temp file in the same folder, so the
-/// game never reads a half-written file.
+/// game never reads a half-written file. An existing file's permissions are
+/// carried over.
 fn write_atomic(path: &Path, contents: &str) -> Result<(), CrosshairError> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(dir).map_err(io_err("create", dir))?;
@@ -293,10 +346,15 @@ fn write_atomic(path: &Path, contents: &str) -> Result<(), CrosshairError> {
         |n| n.to_string_lossy().into_owned(),
     );
     let tmp = dir.join(format!(".{name}.shiv-{}.tmp", std::process::id()));
+    let permissions = fs::metadata(path).ok().map(|m| m.permissions());
     let written = fs::File::create(&tmp)
         .and_then(|mut f| {
             f.write_all(contents.as_bytes())?;
             f.sync_all()
+        })
+        .and_then(|()| match permissions {
+            Some(p) => fs::set_permissions(&tmp, p),
+            None => Ok(()),
         })
         .map_err(io_err("write", &tmp))
         .and_then(|()| fs::rename(&tmp, path).map_err(io_err("replace", path)));
@@ -307,9 +365,9 @@ fn write_atomic(path: &Path, contents: &str) -> Result<(), CrosshairError> {
 }
 
 /// Write `c` into the managed block of `autoexec.cfg`, creating the file and
-/// its folder when missing. Lines outside the block are kept as they are
-/// (line endings follow the file: CRLF stays CRLF). A symlinked
-/// `autoexec.cfg` is written through to its target.
+/// its folder when missing. Lines outside the block keep their bytes and
+/// line endings (see `rewrite`). A symlinked `autoexec.cfg` is written
+/// through to its target.
 ///
 /// This does not check for a running game: the caller decides (the UI
 /// refuses while Deadlock runs, as the old app did).

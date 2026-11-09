@@ -202,20 +202,150 @@ fn apply_keeps_crlf_line_endings() {
     assert_eq!(crosshair::load(&paths).unwrap(), Some(custom()));
 }
 
-#[test]
-fn unterminated_section_is_replaced_to_the_end() {
-    let (_d, paths) = fixture();
+fn write_cfg(paths: &GamePaths, bytes: &[u8]) {
     fs::create_dir_all(paths.autoexec.parent().unwrap()).unwrap();
+    fs::write(&paths.autoexec, bytes).unwrap();
+}
+
+/// The file with the single Shiv block (start through end line) cut out.
+fn outside_block(text: &str) -> String {
+    let start = text.find(crosshair::SECTION_START).unwrap();
+    let end = text.find(crosshair::SECTION_END).unwrap() + crosshair::SECTION_END.len();
+    let end = end + text[end..].find('\n').map_or(text.len() - end, |i| i + 1);
+    format!("{}{}", &text[..start], &text[end..])
+}
+
+#[test]
+fn orphan_start_marker_keeps_the_lines_after_it() {
+    let (_d, paths) = fixture();
     let broken = format!(
-        "fps_max 240\n{}\ncitadel_crosshair_pip_gap 9\n",
+        "fps_max 240\n{}\nbind f1 noclip\nbind f2 \"say hi\"\n",
         crosshair::SECTION_START
     );
-    fs::write(&paths.autoexec, broken).unwrap();
+    write_cfg(&paths, broken.as_bytes());
+    // An unterminated block is not a crosshair: load reads nothing.
+    assert_eq!(crosshair::load(&paths).unwrap(), None);
     crosshair::apply(&paths, &custom()).unwrap();
     let text = fs::read_to_string(&paths.autoexec).unwrap();
-    assert!(!text.contains("pip_gap 9"), "{text}");
-    assert_eq!(text.matches(crosshair::SECTION_END).count(), 1);
-    assert!(text.starts_with("fps_max 240\n"));
+    assert_eq!(
+        outside_block(&text),
+        "fps_max 240\nbind f1 noclip\nbind f2 \"say hi\"\n",
+        "{text}"
+    );
+    assert_eq!(text.matches(crosshair::SECTION_START).count(), 1, "{text}");
+    assert!(text.ends_with(&format!("{}\n", crosshair::SECTION_END)));
+    // A second apply finds the complete block and keeps the user lines.
+    crosshair::apply(&paths, &CrosshairConfig::default()).unwrap();
+    let again = fs::read_to_string(&paths.autoexec).unwrap();
+    assert_eq!(outside_block(&again), outside_block(&text));
+    assert_eq!(
+        crosshair::load(&paths).unwrap(),
+        Some(CrosshairConfig::default())
+    );
+
+    // An orphan start before a real block does not claim the lines between.
+    let mixed = format!(
+        "{s}\nkeep me\n{s}\ncitadel_crosshair_pip_gap 4\n{e}\ntail\n",
+        s = crosshair::SECTION_START,
+        e = crosshair::SECTION_END
+    );
+    write_cfg(&paths, mixed.as_bytes());
+    assert_eq!(crosshair::load(&paths).unwrap().unwrap().gap, 4.0);
+    crosshair::apply(&paths, &custom()).unwrap();
+    let text = fs::read_to_string(&paths.autoexec).unwrap();
+    assert_eq!(outside_block(&text), "keep me\ntail\n", "{text}");
+}
+
+#[test]
+fn duplicated_blocks_become_one_and_user_lines_stay() {
+    let (_d, paths) = fixture();
+    let doubled = format!(
+        "a\n{s}\ncitadel_crosshair_pip_gap 1\n{e}\nb\n{s}\ncitadel_crosshair_pip_gap 2\n{e}\nc\n",
+        s = crosshair::SECTION_START,
+        e = crosshair::SECTION_END
+    );
+    write_cfg(&paths, doubled.as_bytes());
+    // The first complete block is the one read.
+    assert_eq!(crosshair::load(&paths).unwrap().unwrap().gap, 1.0);
+    crosshair::apply(&paths, &custom()).unwrap();
+    let text = fs::read_to_string(&paths.autoexec).unwrap();
+    assert_eq!(text.matches(crosshair::SECTION_START).count(), 1, "{text}");
+    assert!(
+        text.starts_with(&format!("a\n{}\n", crosshair::SECTION_START)),
+        "{text}"
+    );
+    assert_eq!(outside_block(&text), "a\nb\nc\n", "{text}");
+}
+
+#[test]
+fn mixed_line_endings_survive_byte_for_byte() {
+    let (_d, paths) = fixture();
+    // Mostly CRLF, one LF line, no trailing newline.
+    let user = "fps_max 240\r\nbind x jump\nbind y duck\r\n  // last line";
+    write_cfg(&paths, user.as_bytes());
+    crosshair::apply(&paths, &custom()).unwrap();
+    let text = fs::read_to_string(&paths.autoexec).unwrap();
+    // Only the separator before the appended block is added; the block uses
+    // the dominant CRLF.
+    assert!(
+        text.starts_with(&format!("{user}\r\n{}\r\n", crosshair::SECTION_START)),
+        "{text:?}"
+    );
+    assert!(
+        text.ends_with(&format!("{}\r\n", crosshair::SECTION_END)),
+        "{text:?}"
+    );
+
+    // A block in the middle is replaced in place; the bytes around it,
+    // including a missing final newline, are untouched.
+    let around = format!(
+        "a\nb\r\n{s}\r\nold\r\n{e}\nc\r\nd",
+        s = crosshair::SECTION_START,
+        e = crosshair::SECTION_END
+    );
+    write_cfg(&paths, around.as_bytes());
+    crosshair::apply(&paths, &custom()).unwrap();
+    let text = fs::read_to_string(&paths.autoexec).unwrap();
+    assert_eq!(outside_block(&text), "a\nb\r\nc\r\nd", "{text:?}");
+    assert!(text.ends_with("c\r\nd"));
+    // The end marker keeps its own terminator (LF here).
+    assert!(
+        text.contains(&format!("{}\nc", crosshair::SECTION_END)),
+        "{text:?}"
+    );
+    assert_eq!(crosshair::load(&paths).unwrap(), Some(custom()));
+}
+
+#[test]
+fn leading_bom_is_kept_and_does_not_hide_a_marker() {
+    let (_d, paths) = fixture();
+    let with_bom = format!(
+        "\u{feff}{}\ncitadel_crosshair_pip_gap 3\n{}\nfps_max 240\n",
+        crosshair::SECTION_START,
+        crosshair::SECTION_END
+    );
+    write_cfg(&paths, with_bom.as_bytes());
+    assert_eq!(crosshair::load(&paths).unwrap().unwrap().gap, 3.0);
+    crosshair::apply(&paths, &custom()).unwrap();
+    let text = fs::read_to_string(&paths.autoexec).unwrap();
+    assert!(
+        text.starts_with(&format!("\u{feff}{}\n", crosshair::SECTION_START)),
+        "{text:?}"
+    );
+    assert_eq!(text.matches(crosshair::SECTION_START).count(), 1);
+    assert!(text.ends_with("fps_max 240\n"));
+}
+
+#[cfg(unix)]
+#[test]
+fn apply_keeps_file_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_d, paths) = fixture();
+    write_cfg(&paths, b"fps_max 240\n");
+    fs::set_permissions(&paths.autoexec, fs::Permissions::from_mode(0o640)).unwrap();
+    crosshair::apply(&paths, &custom()).unwrap();
+    let mode = fs::metadata(&paths.autoexec).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o640);
 }
 
 #[test]

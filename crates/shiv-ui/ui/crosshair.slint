@@ -263,7 +263,9 @@ export component CrosshairPage inherits Rectangle {
                 y: (parent.height - self.height) / 2;
                 text: "Apply crosshair";
                 primary: true;
-                disabled: root.locked || CrosshairState.loading || CrosshairState.game-running;
+                // Not disabled while the game runs: the flag can be stale, and Apply
+                // re-checks on the worker and says why it refused.
+                disabled: root.locked || CrosshairState.loading;
                 clicked => { CrosshairState.apply(); }
             }
         }
@@ -278,7 +280,7 @@ export component CrosshairPage inherits Rectangle {
                 padding-left: Theme.s2;
                 padding-right: Theme.s2;
                 Text {
-                    text: "Deadlock is running. Close it to apply a crosshair; you can keep editing meanwhile.";
+                    text: "Deadlock was running when last checked. Close it before applying; you can keep editing meanwhile.";
                     color: Theme.text;
                     font-size: Theme.text-md;
                     wrap: word-wrap;

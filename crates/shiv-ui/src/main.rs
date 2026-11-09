@@ -535,8 +535,11 @@ mod tests {
 
         // Busy guard: while an apply is in flight, edits and a second apply
         // are dropped.
+        // The stale "running" flag does not disable the button: the worker
+        // re-checks (the game has closed meanwhile).
         gate.store(true, Ordering::Relaxed);
-        state.invoke_apply();
+        assert!(state.get_game_running());
+        click(&app, "Apply crosshair");
         assert!(state.get_busy());
         state.invoke_edit(CrosshairField::PipGap, 40.0);
         state.invoke_apply();
