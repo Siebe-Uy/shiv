@@ -80,8 +80,17 @@ and app-data layout. Shiv's `analyze`/`apply` API (Task 9b) replaces it.
   `Game citadel/addons` (old app: `citadel/dmm_localization_*`, mounted first).
   Mod VPKs are never modified. Existing files that are replaced or removed
   (package, receipt, learned data, `gameinfo.gi`) are copied first with
-  `repair_backup::create_repair_backup` into `addons/.shiv/repair-backups/`.
-  An empty `mods` list removes the package (after a backup).
+  `repair_backup::create_backup_set` into one folder under
+  `addons/.shiv/repair-backups/`. The index (`repair.json`, version 2)
+  records each file's target folder and whether it existed, so files `apply`
+  created are removed on restore. If a write fails after the package is in
+  place, `apply` restores that set and returns the error. An empty `mods`
+  list removes the package (after a backup). `apply` creates `shiv_repair/`
+  only when it writes a package.
+- `restore_last(paths)` undoes the last apply from its backup set (refuses
+  while the game runs) and renames the set `restored-...`, so the next call
+  goes one apply further back. Restored files get their original bytes,
+  permissions and modification time.
 - The old review dialog has no Shiv equivalent: the package keeps the game's
   load order for choices between mods, and `FixReport::notes` lists what the
   old app would have asked about.

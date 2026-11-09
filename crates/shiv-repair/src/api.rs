@@ -14,7 +14,8 @@
 //!   search path placed before `citadel/addons` makes the game load it ahead
 //!   of the mods. Mod VPKs are never modified. Every existing file `apply`
 //!   replaces or rewrites (the previous package, its receipt and learned game
-//!   data, `gameinfo.gi`) is copied with [`create_repair_backup`] first.
+//!   data, `gameinfo.gi`) is copied with [`create_backup_set`] first. A failed
+//!   write restores that set, and [`restore_last`] undoes the last apply.
 //! - A receipt beside the package records the inputs it was built from, so a
 //!   later [`analyze`] reports the mods as fixed only while the package still
 //!   matches them (`receipt.rs`).
@@ -35,7 +36,7 @@ use crate::mod_health::{
     self, CompatibilityChoice, FixModsStatus, ModFindings, ModHealthSource, ModHealthStatus,
     ModHealthSymptom,
 };
-use crate::repair_backup::create_repair_backup;
+use crate::repair_backup::{create_backup_set, latest_backup_set, restore_backup_set};
 use crate::vdata_history::{BaselineStatus, VdataHistoryIndex};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -113,9 +114,10 @@ pub struct FixReport {
     pub overlay: Option<PathBuf>,
     /// `gameinfo.gi` gained the `Game citadel/shiv_repair` mount.
     pub gameinfo_changed: bool,
-    /// Backup folders written before anything was replaced; each holds
-    /// `files/<name>` and `repair.json` (see [`crate::repair_backup`]).
-    pub backups: Vec<PathBuf>,
+    /// Backup set written before anything changed (`files/<name>` plus
+    /// `repair.json` with each file's folder); [`restore_last`] undoes this
+    /// apply from it. `None` when nothing on disk changed.
+    pub backup: Option<PathBuf>,
     pub packed_files: usize,
     /// Choices the old app asked the player to review; Shiv applies the
     /// game's own load order for them and reports them here.
@@ -751,13 +753,24 @@ pub fn apply_with(
         gameinfo_permissions = Some(fs::metadata(&paths.gameinfo)?.permissions());
     }
 
-    fs::create_dir_all(&dir)?;
-    // The packer replaces this path; staged beside the package so the final
-    // rename stays on one filesystem.
-    let staged = tempfile::NamedTempFile::new_in(&dir)?.into_temp_path();
+    // Removes the package folder again if this call created it and leaves it
+    // empty (nothing to repair, or a rolled-back write).
+    let dir_guard = DirGuard {
+        dir: dir.clone(),
+        existed: dir.is_dir(),
+    };
     let mut result = None;
+    let mut staged = None;
     if let Some(plan) = plan.as_ref().filter(|_| !selected.is_empty()) {
-        result = Some(plan.write(&staged, &[])?).filter(|result| result.has_overlay);
+        fs::create_dir_all(&dir)?;
+        // The packer replaces this path; staged beside the package so the
+        // final rename stays on one filesystem.
+        let path = tempfile::NamedTempFile::new_in(&dir)?.into_temp_path();
+        let written = plan.write(&path, &[])?;
+        if written.has_overlay {
+            result = Some(written);
+            staged = Some(path);
+        }
     }
     if result.is_none() {
         // Nothing to package: no mount is needed and the receipt goes too.
@@ -765,78 +778,161 @@ pub fn apply_with(
         selected.clear();
     }
 
-    // Back up every file that is about to be replaced or removed.
-    let backups_root = backup_dir(paths);
-    let mut backups = Vec::new();
-    let mut replaced: Vec<String> = [OVERLAY_VPK_NAME, RECEIPT_NAME]
-        .into_iter()
-        .filter(|name| dir.join(name).is_file())
-        .map(str::to_owned)
-        .collect();
-    if learned.is_some() && dir.join(HISTORY_NAME).is_file() {
-        replaced.push(HISTORY_NAME.to_owned());
+    // Back up, in one set, every file this call may replace, create or
+    // remove; absent files are recorded so a restore removes them again.
+    let mut targets: Vec<(&Path, &str)> = vec![(&dir, OVERLAY_VPK_NAME), (&dir, RECEIPT_NAME)];
+    if learned.is_some() {
+        targets.push((&dir, HISTORY_NAME));
     }
-    if !replaced.is_empty() {
-        backups.push(create_repair_backup(&dir, &backups_root, &replaced)?);
-    }
+    let gameinfo_name = file_name(&paths.gameinfo);
+    let gameinfo_dir = paths.gameinfo.parent().unwrap_or(&citadel);
     if new_gameinfo.is_some() {
-        let gameinfo_dir = paths.gameinfo.parent().unwrap_or(&citadel);
-        backups.push(create_repair_backup(
-            gameinfo_dir,
-            &backups_root,
-            &[file_name(&paths.gameinfo)],
-        )?);
+        targets.push((gameinfo_dir, &gameinfo_name));
     }
-
-    // Write: package, learned data, receipt, then the mount.
-    let packed_files = result.as_ref().map_or(0, |result| result.packed_files);
-    if result.is_some() {
-        staged
-            .persist(&overlay)
-            .map_err(|error| RepairError::Io(error.error))?;
-    } else {
-        remove_if_exists(&overlay)?;
-    }
-    if let Some(observed) = learned {
-        // Learning is reproducible; a failed save must not fail the repair.
-        match observed.to_bytes() {
-            Ok(bytes) => {
-                if let Err(error) = write_atomic(&dir.join(HISTORY_NAME), &bytes, None) {
-                    log::warn!("Could not save learned game data: {error}");
-                }
-            }
-            Err(error) => log::warn!("Could not encode learned game data: {error}"),
-        }
-    }
-    if result.is_some() {
-        let receipt = Receipt {
-            revision: REPAIR_REVISION,
-            game_build: version,
-            inputs: stamps,
-            fixed: selected.clone(),
-            overlay_hash: digest(&overlay)?,
+    let writes = result.is_some() || targets.iter().any(|(d, n)| d.join(n).is_file());
+    let backup = if writes {
+        let new_dirs: Vec<&Path> = if dir_guard.existed {
+            Vec::new()
+        } else {
+            vec![&dir]
         };
-        let bytes = serde_json::to_vec_pretty(&receipt).map_err(|error| {
-            RepairError::InvalidInput(format!("Could not record the repair package: {error}"))
-        })?;
-        write_atomic(&dir.join(RECEIPT_NAME), &bytes, None)?;
+        Some(create_backup_set(&backup_dir(paths), &targets, &new_dirs)?)
     } else {
-        remove_if_exists(&dir.join(RECEIPT_NAME))?;
-    }
+        None
+    };
+
     let gameinfo_changed = new_gameinfo.is_some();
-    if let Some(text) = new_gameinfo {
-        write_atomic(&paths.gameinfo, text.as_bytes(), gameinfo_permissions)?;
+    let packed_files = result.as_ref().map_or(0, |result| result.packed_files);
+    let fixed: Vec<ModId> = selected.iter().cloned().collect();
+    let write = || -> Result<(), RepairError> {
+        // Package, learned data, receipt, then the mount.
+        if let Some(staged) = staged {
+            staged
+                .persist(&overlay)
+                .map_err(|error| RepairError::Io(error.error))?;
+        } else {
+            remove_if_exists(&overlay)?;
+        }
+        if let Some(observed) = learned {
+            // Learning is reproducible; a failed save must not fail the repair.
+            match observed.to_bytes() {
+                Ok(bytes) => {
+                    if let Err(error) = write_atomic(&dir.join(HISTORY_NAME), &bytes, None) {
+                        log::warn!("Could not save learned game data: {error}");
+                    }
+                }
+                Err(error) => log::warn!("Could not encode learned game data: {error}"),
+            }
+        }
+        if result.is_some() {
+            let receipt = Receipt {
+                revision: REPAIR_REVISION,
+                game_build: version,
+                inputs: stamps,
+                fixed: selected,
+                overlay_hash: digest(&overlay)?,
+            };
+            let bytes = serde_json::to_vec_pretty(&receipt).map_err(|error| {
+                RepairError::InvalidInput(format!("Could not record the repair package: {error}"))
+            })?;
+            write_atomic(&dir.join(RECEIPT_NAME), &bytes, None)?;
+        } else {
+            remove_if_exists(&dir.join(RECEIPT_NAME))?;
+        }
+        if let Some(text) = new_gameinfo {
+            write_atomic(&paths.gameinfo, text.as_bytes(), gameinfo_permissions)?;
+        }
+        Ok(())
+    };
+    if let Err(error) = write() {
+        // Put back the state from before this call, then report the cause.
+        if let Some(backup) = &backup {
+            match restore_backup_set(backup) {
+                Ok(_) => {
+                    if let Err(cleanup) = fs::remove_dir_all(backup) {
+                        log::warn!("Could not remove the rolled-back backup: {cleanup}");
+                    }
+                }
+                Err(rollback) => log::error!(
+                    "Repair failed ({error}) and rolling back failed ({rollback}); the previous files are in {}",
+                    backup.display()
+                ),
+            }
+        }
+        return Err(error);
     }
 
     Ok(FixReport {
         status: FixModsStatus::Applied,
-        fixed: selected.into_iter().collect(),
+        fixed,
         skipped,
         overlay: result.is_some().then_some(overlay),
         gameinfo_changed,
-        backups,
+        backup,
         packed_files,
         notes,
+    })
+}
+
+struct DirGuard {
+    dir: PathBuf,
+    existed: bool,
+}
+
+impl Drop for DirGuard {
+    fn drop(&mut self) {
+        if !self.existed {
+            // Fails while the folder holds anything, which is what we want.
+            let _ = fs::remove_dir(&self.dir);
+        }
+    }
+}
+
+/// What [`restore_last`] put back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestoreReport {
+    /// The backup that was restored, renamed with a `restored-` prefix so the
+    /// next undo goes one repair further back.
+    pub backup: PathBuf,
+    pub restored: Vec<PathBuf>,
+    pub removed: Vec<PathBuf>,
+}
+
+/// Undo the last [`apply`]: puts back the package, receipt, learned data and
+/// `gameinfo.gi` exactly as they were before it, and removes files it created.
+/// Refuses while the game runs.
+pub fn restore_last(paths: &GamePaths) -> Result<RestoreReport, RepairError> {
+    restore_last_with(paths, game::is_running)
+}
+
+/// [`restore_last`] with an injectable running-game check.
+pub fn restore_last_with(
+    paths: &GamePaths,
+    game_running: impl Fn() -> bool,
+) -> Result<RestoreReport, RepairError> {
+    if game_running() {
+        return Err(RepairError::GameRunning);
+    }
+    let root = backup_dir(paths);
+    let Some(backup) = latest_backup_set(&root)? else {
+        return Err(RepairError::BackupRestoreFailed(
+            "There is no repair to undo".to_owned(),
+        ));
+    };
+    let outcome = restore_backup_set(&backup)?;
+    let consumed = root.join(format!("restored-{}", file_name(&backup)));
+    let backup = match fs::rename(&backup, &consumed) {
+        Ok(()) => consumed,
+        Err(error) => {
+            // Restoring the same set again is harmless: matching files are skipped.
+            log::warn!("Could not mark {} as restored: {error}", backup.display());
+            backup
+        }
+    };
+    Ok(RestoreReport {
+        backup,
+        restored: outcome.restored,
+        removed: outcome.removed,
     })
 }
 
@@ -914,21 +1010,34 @@ mod tests {
         Fixture { _temp: temp, paths }
     }
 
-    fn snapshot(root: &Path) -> BTreeMap<PathBuf, (Vec<u8>, SystemTime)> {
+    /// Every file (bytes and mtime) and every folder under `root`, except
+    /// paths under `skip`.
+    fn snapshot_except(
+        root: &Path,
+        skip: Option<&Path>,
+    ) -> BTreeMap<PathBuf, Option<(Vec<u8>, SystemTime)>> {
         let mut out = BTreeMap::new();
         let mut pending = vec![root.to_path_buf()];
         while let Some(dir) = pending.pop() {
             for entry in fs::read_dir(&dir).unwrap() {
                 let path = entry.unwrap().path();
+                if skip.is_some_and(|skip| path.starts_with(skip)) {
+                    continue;
+                }
                 if path.is_dir() {
+                    out.insert(path.clone(), None);
                     pending.push(path);
                 } else {
                     let modified = fs::metadata(&path).unwrap().modified().unwrap();
-                    out.insert(path.clone(), (fs::read(&path).unwrap(), modified));
+                    out.insert(path.clone(), Some((fs::read(&path).unwrap(), modified)));
                 }
             }
         }
         out
+    }
+
+    fn snapshot(root: &Path) -> BTreeMap<PathBuf, Option<(Vec<u8>, SystemTime)>> {
+        snapshot_except(root, None)
     }
 
     fn only(report: &[ModHealth]) -> &ModHealth {
@@ -972,8 +1081,8 @@ mod tests {
         // gameinfo.gi changed by one mount line, and its original is backed up.
         let edited = fs::read_to_string(&fx.paths.gameinfo).unwrap();
         assert!(crate::gameinfo::mounts_overlay(&edited).unwrap());
-        assert_eq!(report.backups.len(), 1, "{report:?}");
-        let saved = report.backups[0].join("files").join("gameinfo.gi");
+        let backup = report.backup.clone().unwrap();
+        let saved = backup.join("files").join("gameinfo.gi");
         assert_eq!(fs::read(saved).unwrap(), gameinfo);
         // The mod itself is never edited.
         assert_eq!(
@@ -986,9 +1095,8 @@ mod tests {
         let first = fs::read(fx.overlay()).unwrap();
         let again = apply_with(&fx.paths, &["data".into()], || false).unwrap();
         assert!(!again.gameinfo_changed);
-        assert_eq!(again.backups.len(), 1, "{again:?}");
         assert_eq!(
-            fs::read(again.backups[0].join("files").join("pak01_dir.vpk")).unwrap(),
+            fs::read(again.backup.unwrap().join("files").join("pak01_dir.vpk")).unwrap(),
             first
         );
         assert_eq!(only(&analyze(&fx.paths, 100)).status, RepairStatus::Fixed);
@@ -1015,7 +1123,7 @@ mod tests {
         assert_eq!(report.overlay, None);
         assert!(!fx.overlay().exists());
         assert_eq!(
-            fs::read(report.backups[0].join("files").join("pak01_dir.vpk")).unwrap(),
+            fs::read(report.backup.unwrap().join("files").join("pak01_dir.vpk")).unwrap(),
             package
         );
         assert_eq!(only(&analyze(&fx.paths, 100)).status, RepairStatus::Fixable);
@@ -1028,5 +1136,102 @@ mod tests {
         assert!(report.fixed.is_empty());
         assert_eq!(report.skipped.len(), 1);
         assert_eq!(report.skipped[0].0, "missing");
+        assert_eq!(report.backup, None);
+        // Nothing was repaired, so nothing is created: no empty package folder.
+        assert!(!fx.citadel().join("shiv_repair").exists());
+        assert!(
+            !fx.paths
+                .addons
+                .join(".shiv")
+                .join("repair-backups")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn a_mod_with_nothing_to_repair_leaves_no_folder_behind() {
+        let fx = fixture();
+        // The game's own table: the mod matches the game, so nothing to fix.
+        pack(
+            &fx._temp.path().join("same-src"),
+            vec![("hero_a".into(), hero(1)), ("hero_new".into(), hero(2))],
+            &fx.paths.addons.join("pak01_dir.vpk"),
+        );
+        let before = snapshot(&fx.paths.root);
+        let report = apply_with(&fx.paths, &["data".into()], || false).unwrap();
+        assert!(report.fixed.is_empty(), "{report:?}");
+        assert_eq!(
+            report.skipped,
+            [("data".to_owned(), "Nothing to repair".to_owned())]
+        );
+        assert_eq!(snapshot(&fx.paths.root), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_write_after_the_package_rolls_back_to_the_previous_state() {
+        use std::os::unix::fs::PermissionsExt;
+        let fx = fixture();
+        apply_with(&fx.paths, &["data".into()], || false).unwrap();
+        // The game update reverted gameinfo.gi, so the next apply must mount
+        // the package again; make that last write fail.
+        fs::write(&fx.paths.gameinfo, GAMEINFO).unwrap();
+        let citadel = fx.citadel();
+        let mode = fs::metadata(&citadel).unwrap().permissions().mode();
+        fs::set_permissions(&citadel, fs::Permissions::from_mode(0o555)).unwrap();
+        if tempfile::NamedTempFile::new_in(&citadel).is_ok() {
+            fs::set_permissions(&citadel, fs::Permissions::from_mode(mode)).unwrap();
+            eprintln!("skipped: permissions are not enforced (running as root?)");
+            return;
+        }
+        // A package on disk that the new one cannot match, so the rollback
+        // must really put the old bytes back over the new package.
+        fs::write(fx.overlay(), b"previous package").unwrap();
+        let before = snapshot(&fx.paths.root);
+        let previous = fs::read(fx.overlay()).unwrap();
+        let result = apply_with(&fx.paths, &["data".into()], || false);
+        let after = snapshot(&fx.paths.root);
+        fs::set_permissions(&citadel, fs::Permissions::from_mode(mode)).unwrap();
+        assert!(matches!(result, Err(RepairError::Io(_))), "{result:?}");
+        assert_eq!(after, before);
+        assert_eq!(fs::read(fx.overlay()).unwrap(), previous);
+    }
+
+    #[test]
+    fn restore_last_undoes_an_apply_exactly() {
+        let fx = fixture();
+        let backups = fx.paths.addons.join(".shiv").join("repair-backups");
+        let before = snapshot(&fx.paths.root);
+        apply_with(&fx.paths, &["data".into()], || false).unwrap();
+        assert_ne!(snapshot_except(&fx.paths.root, Some(&backups)), before);
+
+        assert!(matches!(
+            restore_last_with(&fx.paths, || true),
+            Err(RepairError::GameRunning)
+        ));
+        let report = restore_last_with(&fx.paths, || false).unwrap();
+        assert!(report.restored.contains(&fx.paths.gameinfo), "{report:?}");
+        assert!(report.removed.contains(&fx.overlay()), "{report:?}");
+        assert_eq!(snapshot_except(&fx.paths.root, Some(&backups)), before);
+        assert_eq!(only(&analyze(&fx.paths, 100)).status, RepairStatus::Fixable);
+
+        // That repair is undone; there is nothing further back.
+        assert!(matches!(
+            restore_last_with(&fx.paths, || false),
+            Err(RepairError::BackupRestoreFailed(_))
+        ));
+    }
+
+    #[test]
+    fn restore_last_steps_back_one_apply_at_a_time() {
+        let fx = fixture();
+        apply_with(&fx.paths, &["data".into()], || false).unwrap();
+        let backups = fx.paths.addons.join(".shiv").join("repair-backups");
+        let after_first = snapshot_except(&fx.paths.root, Some(&backups));
+        apply_with(&fx.paths, &[], || false).unwrap();
+        assert!(!fx.overlay().exists());
+        restore_last_with(&fx.paths, || false).unwrap();
+        assert_eq!(snapshot_except(&fx.paths.root, Some(&backups)), after_first);
+        assert_eq!(only(&analyze(&fx.paths, 100)).status, RepairStatus::Fixed);
     }
 }
