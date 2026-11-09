@@ -14,4 +14,6 @@ pub enum ApiError {
     EmptyDownload,
     #[error("download incomplete: received {received} of {expected} bytes")]
     Incomplete { received: u64, expected: u64 },
+    #[error("download cancelled")]
+    Cancelled,
 }

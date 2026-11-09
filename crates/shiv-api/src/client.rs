@@ -1,6 +1,7 @@
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use ureq::Agent;
@@ -141,9 +142,23 @@ impl Client {
         dest: &Path,
         progress: impl FnMut(u64, Option<u64>),
     ) -> Result<(), ApiError> {
+        self.fetch_cancellable(url, dest, &AtomicBool::new(false), progress)
+    }
+
+    /// [`Client::fetch`] that stops with [`ApiError::Cancelled`] once `cancel`
+    /// is set. The flag is checked between chunks, so a stalled read returns
+    /// only when its next chunk arrives or the body timeout fires; callers
+    /// should stop waiting on the result as soon as they set the flag.
+    pub fn fetch_cancellable(
+        &self,
+        url: &str,
+        dest: &Path,
+        cancel: &AtomicBool,
+        progress: impl FnMut(u64, Option<u64>),
+    ) -> Result<(), ApiError> {
         let part = part_path(dest);
         let result = self
-            .fetch_to_part(url, &part, progress)
+            .fetch_to_part(url, &part, cancel, progress)
             .and_then(|()| fs::rename(&part, dest).map_err(ApiError::from));
         if result.is_err() {
             let _ = fs::remove_file(&part);
@@ -155,8 +170,13 @@ impl Client {
         &self,
         url: &str,
         part: &Path,
+        cancel: &AtomicBool,
         mut progress: impl FnMut(u64, Option<u64>),
     ) -> Result<(), ApiError> {
+        let cancelled = || cancel.load(Ordering::Relaxed);
+        if cancelled() {
+            return Err(ApiError::Cancelled);
+        }
         let mut resp = self.download.get(url).call().map_err(|e| map_err(e, url))?;
         let total = resp
             .headers()
@@ -168,6 +188,9 @@ impl Client {
         let mut buf = [0u8; 64 * 1024];
         let mut done: u64 = 0;
         loop {
+            if cancelled() {
+                return Err(ApiError::Cancelled);
+            }
             let n = match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => n,

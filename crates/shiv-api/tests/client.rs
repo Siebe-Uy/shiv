@@ -143,6 +143,40 @@ fn fetch_removes_partial_file_on_error() {
 }
 
 #[test]
+fn fetch_cancellable_stops_and_removes_partial_file() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let payload = vec![7u8; 1_000_000];
+    let url = stub(1, move |_| Response::from_data(payload.clone()));
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("m.zip");
+    let cancel = AtomicBool::new(false);
+    let mut calls = 0;
+    let r = Client::new(&url).fetch_cancellable(&format!("{url}/f"), &dest, &cancel, |_, _| {
+        calls += 1;
+        cancel.store(true, Ordering::Relaxed);
+    });
+    assert!(matches!(r, Err(ApiError::Cancelled)), "{r:?}");
+    assert_eq!(calls, 1);
+    assert!(!dest.exists());
+    assert!(!dir.path().join("m.zip.part").exists());
+}
+
+#[test]
+fn fetch_cancellable_set_before_start_does_not_request() {
+    use std::sync::atomic::AtomicBool;
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("m.zip");
+    let r = Client::new("http://unused").fetch_cancellable(
+        "http://127.0.0.1:9/f",
+        &dest,
+        &AtomicBool::new(true),
+        |_, _| {},
+    );
+    assert!(matches!(r, Err(ApiError::Cancelled)), "{r:?}");
+    assert!(!dir.path().join("m.zip.part").exists());
+}
+
+#[test]
 fn fetch_rejects_empty_body() {
     let url = stub(1, |_| Response::from_data(Vec::new()));
     let dir = tempfile::tempdir().unwrap();
