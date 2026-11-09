@@ -1,0 +1,172 @@
+/* Shiv — Brass Noir base styles. Load after tokens.css.
+ * Fonts: bundle Chakra Petch (500, 700) and JetBrains Mono (400, 500)
+ * locally (both SIL OFL) — e.g. from @fontsource — rather than a CDN.
+ */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: var(--text-md);
+  line-height: var(--leading-normal);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---- Type ---------------------------------------------------------------- */
+h1, h2, h3, h4 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: var(--weight-bold);
+  line-height: var(--leading-tight);
+  letter-spacing: var(--tracking-display);
+}
+h1 { font-size: var(--text-3xl); }
+h2 { font-size: var(--text-2xl); }
+h3 { font-size: var(--text-xl); }
+h4 { font-size: var(--text-lg); }
+
+p { margin: 0; }
+
+.label {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.muted { color: var(--text-muted); }
+
+code, kbd, pre, .mono { font-family: var(--font-mono); font-size: 0.92em; }
+code {
+  padding: 0.1em 0.35em;
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+}
+
+a { color: var(--accent-text); text-underline-offset: 0.2em; }
+a:hover { color: var(--accent-hover); }
+
+::selection { background: var(--accent); color: var(--text-on-accent); }
+
+:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
+/* ---- Buttons ------------------------------------------------------------- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  min-height: 36px;
+  padding: 0 var(--space-4);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  color: var(--text);
+  font: var(--weight-medium) var(--text-sm) / 1 var(--font-display);
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
+}
+.btn:hover { border-color: var(--accent); }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--text-on-accent);
+  font-weight: var(--weight-bold);
+}
+.btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+
+.btn-ghost { background: transparent; border-color: transparent; }
+.btn-ghost:hover { background: var(--accent-subtle); border-color: transparent; }
+
+.btn-danger { color: var(--danger); }
+.btn-danger:hover { border-color: var(--danger); }
+
+/* ---- Inputs -------------------------------------------------------------- */
+.input {
+  width: 100%;
+  min-height: 36px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-sunken);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-sm);
+}
+.input::placeholder { color: var(--text-muted); }
+.input:hover { border-color: var(--border-strong); }
+.input:focus-visible { border-color: var(--accent); }
+
+/* ---- Surfaces ------------------------------------------------------------ */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-5);
+}
+
+.divider { height: 1px; border: 0; background: var(--border); margin: var(--space-4) 0; }
+
+/* ---- Badges (mod status etc.) ------------------------------------------- */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-sm);
+  border: 1px solid currentColor;
+  font: var(--weight-medium) var(--text-xs) / 1.4 var(--font-mono);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.badge-accent  { color: var(--accent-text); background: var(--accent-subtle); }
+.badge-success { color: var(--success); }
+.badge-warning { color: var(--warning); }
+.badge-danger  { color: var(--danger); }
+
+/* ---- Toggle (enable/disable a mod) -------------------------------------- */
+.toggle {
+  appearance: none;
+  position: relative;
+  width: 36px;
+  height: 20px;
+  margin: 0;
+  border-radius: 999px;
+  background: var(--border-strong);
+  cursor: pointer;
+  transition: background var(--dur-med) var(--ease);
+}
+.toggle::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--text);
+  transition: transform var(--dur-med) var(--ease);
+}
+.toggle:checked { background: var(--accent); }
+.toggle:checked::after { transform: translateX(16px); background: var(--text-on-accent); }
+
+/* ---- Scrollbars ---------------------------------------------------------- */
+* { scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
+
+/* ---- Brand helpers ------------------------------------------------------- */
+.shiv-mark, .shiv-wordmark { display: block; height: auto; }
+.shiv-mark-mono, .shiv-wordmark-mono { color: var(--text); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition-duration: 0ms !important; animation-duration: 0ms !important; }
+}

@@ -2,22 +2,29 @@
 // Dark neutral surfaces, no gradients, no glow, no decorative shadows.
 
 export global Theme {
+    // Brass Noir (dark) tokens, from style/tokens.json.
     // Surfaces, darkest to lightest.
-    out property <color> bg: #111214;
-    out property <color> sidebar: #16171a;
-    out property <color> raised: #1d1f23;
-    out property <color> hover: #23262b;
-    out property <color> border: #2a2d33;
+    out property <color> bg-sunken: #0b0a09;
+    out property <color> bg: #121110;
+    out property <color> sidebar: #0b0a09;
+    out property <color> raised: #1e1b17;
+    out property <color> hover: #2a2620;
+    out property <color> border: #3a352d;
+    out property <color> border-strong: #4e483d;
 
     // Text.
-    out property <color> text: #e6e6e8;
-    out property <color> text-muted: #8c8f96;
-    out property <color> text-faint: #5d6067;
+    out property <color> text: #ede6d6;
+    out property <color> text-muted: #a69f90;
+    out property <color> text-faint: #a69f90;
 
-    // The single accent (muted brass) and the text that sits on it.
-    out property <color> accent: #c9a86a;
-    out property <color> accent-hover: #d6b77c;
-    out property <color> on-accent: #15130e;
+    // The single accent (brass) and the text that sits on it.
+    out property <color> accent: #c9a44c;
+    out property <color> accent-hover: #d9b862;
+    out property <color> on-accent: #121110;
+
+    // Status.
+    out property <color> success: #6fbf9f;
+    out property <color> danger: #e5636b;
 
     // Typography. One family; sizes are free, spacing is not.
     out property <string> font: "Adwaita Sans";
@@ -33,4 +40,5 @@ export global Theme {
     out property <length> s4: 32px;
     out property <length> control-h: 32px;
     out property <length> radius: 4px;
+    out property <length> radius-md: 8px;
 }

@@ -68,6 +68,7 @@ component Placeholder inherits Rectangle {
 
 export component App inherits Window {
     title: "Shiv";
+    icon: @image-url("assets/shiv-icon-64.png");
     preferred-width: 1120px;
     preferred-height: 760px;
     min-width: 840px;
@@ -89,13 +90,18 @@ export component App inherits Window {
                 spacing: Theme.s1;
                 alignment: start;
 
-                Text {
+                Rectangle {
                     height: Theme.s4 + Theme.s1;
-                    text: "Shiv";
-                    color: Theme.text;
-                    font-size: Theme.text-xl;
-                    font-weight: 600;
-                    vertical-alignment: top;
+
+                    Image {
+                        x: 0px;
+                        y: 0px;
+                        width: 54px;
+                        height: Theme.s3;
+                        source: @image-url("assets/shiv-wordmark.svg");
+                        image-fit: contain;
+                        horizontal-alignment: left;
+                    }
                 }
 
                 for name[i] in root.screens: NavItem {

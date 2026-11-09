@@ -1,0 +1,123 @@
+/* Shiv — Brass Noir design tokens
+ * Dark is the default theme; set data-theme="light" on <html> for light.
+ * All text/background pairs below meet WCAG AA (4.5:1) for body text.
+ */
+
+:root {
+  /* ---- Raw palette ---------------------------------------------------- */
+  --shiv-ink-950: #0B0A09;
+  --shiv-ink-900: #121110;   /* ground */
+  --shiv-ink-850: #1E1B17;   /* surface */
+  --shiv-ink-800: #2A2620;   /* raised */
+  --shiv-ink-700: #3A352D;   /* border */
+  --shiv-ink-600: #4E483D;
+  --shiv-bone-500: #A69F90;  /* muted text on dark  (7.2:1 on ink-900) */
+  --shiv-bone-300: #BFB7A4;  /* bevel */
+  --shiv-bone-100: #EDE6D6;  /* bone  (15.2:1 on ink-900) */
+  --shiv-paper-100: #F6F2E8;
+  --shiv-paper-200: #ECE6D8;
+  --shiv-paper-300: #D9D1BF;
+
+  --shiv-brass-300: #D9B862; /* hover */
+  --shiv-brass-400: #C9A44C; /* brass (8.0:1 on ink-900) */
+  --shiv-brass-600: #9C7B2E; /* brass for marks on light grounds */
+  --shiv-brass-700: #7A6128; /* brass text on paper (5.3:1) */
+
+  --shiv-patina-400: #6FBF9F;
+  --shiv-patina-700: #2F7A5E;
+  --shiv-blood-400: #E5636B;
+  --shiv-blood-700: #B3303A;
+
+  /* ---- Semantic: dark (default) -------------------------------------- */
+  color-scheme: dark;
+  --bg: var(--shiv-ink-900);
+  --bg-sunken: var(--shiv-ink-950);
+  --surface: var(--shiv-ink-850);
+  --surface-raised: var(--shiv-ink-800);
+  --border: var(--shiv-ink-700);
+  --border-strong: var(--shiv-ink-600);
+
+  --text: var(--shiv-bone-100);
+  --text-muted: var(--shiv-bone-500);
+  --text-on-accent: var(--shiv-ink-900);
+
+  --accent: var(--shiv-brass-400);
+  --accent-hover: var(--shiv-brass-300);
+  --accent-text: var(--shiv-brass-400);
+  --accent-subtle: rgb(201 164 76 / 0.14);
+
+  --success: var(--shiv-patina-400);
+  --warning: var(--shiv-brass-400);
+  --danger: var(--shiv-blood-400);
+
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+  --shadow-1: 0 1px 2px rgb(0 0 0 / 0.4);
+  --shadow-2: 0 8px 24px rgb(0 0 0 / 0.45);
+
+  /* ---- Type ----------------------------------------------------------- */
+  --font-display: "Chakra Petch", ui-sans-serif, system-ui, sans-serif;
+  --font-body: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
+
+  --text-xs: 0.75rem;   /* 12 */
+  --text-sm: 0.875rem;  /* 14 */
+  --text-md: 1rem;      /* 16 */
+  --text-lg: 1.25rem;   /* 20 */
+  --text-xl: 1.5rem;    /* 24 */
+  --text-2xl: 2rem;     /* 32 */
+  --text-3xl: 3rem;     /* 48 */
+
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-bold: 700;
+  --leading-tight: 1.15;
+  --leading-normal: 1.5;
+  --tracking-display: 0.02em;
+  --tracking-label: 0.12em;
+
+  /* ---- Space, radius, motion ----------------------------------------- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --space-8: 64px;
+
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 14px;
+  --radius-icon: 22%;   /* app icon tile corner, relative to size */
+
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+  --dur-fast: 120ms;
+  --dur-med: 200ms;
+}
+
+/* ---- Semantic: light --------------------------------------------------- */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: var(--shiv-paper-100);
+  --bg-sunken: var(--shiv-paper-200);
+  --surface: #FFFFFF;
+  --surface-raised: #FFFFFF;
+  --border: var(--shiv-paper-300);
+  --border-strong: #BDB3A0;
+
+  --text: var(--shiv-ink-900);
+  --text-muted: #5E584C;            /* 6.3:1 on paper */
+  --text-on-accent: var(--shiv-ink-900);
+
+  --accent: var(--shiv-brass-400);
+  --accent-hover: var(--shiv-brass-300);
+  --accent-text: var(--shiv-brass-700);
+  --accent-subtle: rgb(156 123 46 / 0.12);
+
+  --success: var(--shiv-patina-700);
+  --warning: var(--shiv-brass-700);
+  --danger: var(--shiv-blood-700);
+
+  --shadow-1: 0 1px 2px rgb(18 17 16 / 0.08);
+  --shadow-2: 0 8px 24px rgb(18 17 16 / 0.12);
+}
