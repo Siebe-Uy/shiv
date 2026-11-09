@@ -2,8 +2,9 @@
 
 import { Theme } from "theme.slint";
 import { BrowsePage, BrowseState, ModRow, LoadState, InstallState } from "browse.slint";
+import { InstalledPage, InstalledState, InstalledRow } from "installed.slint";
 
-export { BrowseState, ModRow, LoadState, InstallState }
+export { BrowseState, ModRow, LoadState, InstallState, InstalledState, InstalledRow }
 
 component NavItem inherits Rectangle {
     in property <string> label;
@@ -80,6 +81,13 @@ export component App inherits Window {
     in-out property <int> screen: 0;
     property <[string]> screens: ["Browse", "Installed", "Crosshair", "Performance", "Repair"];
 
+    // Re-read the addons folder whenever the Installed screen is shown.
+    changed screen => {
+        if (root.screen == 1) {
+            InstalledState.refresh();
+        }
+    }
+
     HorizontalLayout {
         Rectangle {
             width: 200px;
@@ -128,10 +136,16 @@ export component App inherits Window {
                 visible: root.screen == 0;
             }
 
+            InstalledPage {
+                width: parent.width;
+                height: parent.height;
+                visible: root.screen == 1;
+            }
+
             for name[i] in root.screens: Placeholder {
                 width: parent.width;
                 height: parent.height;
-                visible: i > 0 && root.screen == i;
+                visible: i > 1 && root.screen == i;
                 title: name;
             }
         }

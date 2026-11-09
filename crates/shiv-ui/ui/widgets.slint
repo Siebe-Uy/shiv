@@ -6,6 +6,8 @@ import { Theme } from "theme.slint";
 export component Button inherits Rectangle {
     in property <string> text;
     in property <bool> primary: false;
+    // Destructive action: outlined and labelled in the danger colour.
+    in property <bool> danger: false;
     callback clicked;
 
     accessible-role: button;
@@ -16,14 +18,14 @@ export component Button inherits Rectangle {
     min-width: label.preferred-width + 2 * Theme.s2;
     border-radius: Theme.radius;
     border-width: root.primary ? 0px : 1px;
-    border-color: ta.has-hover ? Theme.accent : Theme.border;
+    border-color: root.danger ? Theme.danger : (ta.has-hover ? Theme.accent : Theme.border);
     background: root.primary
         ? (ta.has-hover ? Theme.accent-hover : Theme.accent)
         : (ta.has-hover ? Theme.hover : transparent);
 
     label := Text {
         text: root.text;
-        color: root.primary ? Theme.on-accent : Theme.text;
+        color: root.primary ? Theme.on-accent : (root.danger ? Theme.danger : Theme.text);
         font-size: Theme.text-md;
         font-weight: 600;
         horizontal-alignment: center;
@@ -39,11 +41,18 @@ export component Button inherits Rectangle {
 // Text-only action, for secondary actions that sit inside dense rows.
 export component TextButton inherits Rectangle {
     in property <string> text;
+    in property <bool> disabled: false;
     callback clicked;
 
     accessible-role: button;
     accessible-label: root.text;
-    accessible-action-default => { root.clicked(); }
+    accessible-action-default => {
+        if (!root.disabled) {
+            root.clicked();
+        }
+    }
+
+    opacity: root.disabled ? 0.4 : 1.0;
 
     height: Theme.control-h;
     min-width: label.preferred-width + Theme.s2;
@@ -58,6 +67,7 @@ export component TextButton inherits Rectangle {
     }
 
     ta := TouchArea {
+        enabled: !root.disabled;
         mouse-cursor: pointer;
         clicked => { root.clicked(); }
     }
@@ -200,5 +210,43 @@ export component ProgressBar inherits Rectangle {
         height: parent.height;
         border-radius: 2px;
         background: Theme.accent;
+    }
+}
+
+// On/off switch. Reports a toggle request; the owner flips `checked`.
+export component Switch inherits Rectangle {
+    in property <bool> checked;
+    in property <bool> disabled: false;
+    in property <string> label;
+    callback toggled;
+
+    accessible-role: switch;
+    accessible-label: root.label;
+    accessible-checked: root.checked;
+    accessible-action-default => {
+        if (!root.disabled) {
+            root.toggled();
+        }
+    }
+
+    width: 40px;
+    height: 24px;
+    border-radius: self.height / 2;
+    background: root.checked ? Theme.accent : Theme.border-strong;
+    opacity: root.disabled ? 0.4 : 1.0;
+
+    Rectangle {
+        x: root.checked ? parent.width - self.width - 4px : 4px;
+        y: 4px;
+        width: parent.height - 8px;
+        height: self.width;
+        border-radius: self.width / 2;
+        background: root.checked ? Theme.on-accent : Theme.text;
+    }
+
+    ta := TouchArea {
+        enabled: !root.disabled;
+        mouse-cursor: pointer;
+        clicked => { root.toggled(); }
     }
 }

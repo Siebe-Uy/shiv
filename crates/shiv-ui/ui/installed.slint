@@ -1,0 +1,270 @@
+// Installed: mods found in the addons folder, with enable toggle and uninstall.
+
+import { ListView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Button, TextButton, Switch } from "widgets.slint";
+import { LoadState, CenteredMessage } from "browse.slint";
+
+export struct InstalledRow {
+    id: string,
+    name: string,
+    detail: string,
+    // Subtle label for VPKs Shiv did not install; empty for managed mods.
+    tag: string,
+    thumb: image,
+    has-thumb: bool,
+    enabled: bool,
+    managed: bool,
+}
+
+export global InstalledState {
+    in property <[InstalledRow]> rows;
+    in property <LoadState> load-state: LoadState.loading;
+    in property <string> error-text;
+    in property <string> banner-text;
+    in property <string> summary;
+    // Deadlock is running: toggling and uninstalling are refused.
+    in property <bool> game-running;
+    // An action is in flight on a worker thread.
+    in property <bool> busy;
+    // Row waiting for uninstall confirmation, "" when none.
+    in-out property <string> confirm-id;
+
+    callback refresh();
+    callback toggle(string);
+    callback uninstall(string);
+    callback dismiss-banner();
+}
+
+component InstalledRowView inherits Rectangle {
+    in property <InstalledRow> item;
+    in property <bool> locked;
+
+    height: 90px + 2 * Theme.s1 + 1px;
+    background: hover-area.has-hover ? Theme.raised : transparent;
+
+    hover-area := TouchArea { }
+
+    HorizontalLayout {
+        padding-top: Theme.s1;
+        padding-bottom: Theme.s1 + 1px;
+        padding-left: Theme.s1;
+        padding-right: Theme.s2;
+        spacing: Theme.s2;
+
+        Rectangle {
+            width: 160px;
+            height: 90px;
+            border-radius: Theme.radius;
+            clip: true;
+            background: Theme.hover;
+            Image {
+                width: parent.width;
+                height: parent.height;
+                source: root.item.thumb;
+                image-fit: cover;
+                visible: root.item.has-thumb;
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+            spacing: Theme.s1;
+            horizontal-stretch: 1;
+            Text {
+                text: root.item.name;
+                color: root.item.enabled ? Theme.text : Theme.text-muted;
+                font-size: Theme.text-lg;
+                font-weight: 600;
+                overflow: elide;
+            }
+            if root.item.detail != "": Text {
+                text: root.item.detail;
+                color: Theme.text-muted;
+                font-size: Theme.text-md;
+                overflow: elide;
+            }
+            if root.item.tag != "": Text {
+                text: root.item.tag;
+                color: Theme.text-faint;
+                font-size: Theme.text-sm;
+                overflow: elide;
+            }
+        }
+
+        VerticalLayout {
+            width: 200px;
+            alignment: center;
+            spacing: Theme.s1;
+
+            if InstalledState.confirm-id != root.item.id: HorizontalLayout {
+                spacing: Theme.s1;
+                Text {
+                    text: root.item.enabled ? "Enabled" : "Disabled";
+                    color: Theme.text-muted;
+                    font-size: Theme.text-md;
+                    vertical-alignment: center;
+                    horizontal-alignment: right;
+                    horizontal-stretch: 1;
+                }
+                Switch {
+                    label: "Enable " + root.item.name;
+                    checked: root.item.enabled;
+                    disabled: root.locked;
+                    toggled => { InstalledState.toggle(root.item.id); }
+                }
+            }
+            if InstalledState.confirm-id != root.item.id: HorizontalLayout {
+                alignment: end;
+                TextButton {
+                    text: "Uninstall";
+                    disabled: root.locked;
+                    clicked => { InstalledState.confirm-id = root.item.id; }
+                }
+            }
+
+            if InstalledState.confirm-id == root.item.id: Text {
+                text: "Delete this mod's files?";
+                color: Theme.text;
+                font-size: Theme.text-md;
+                horizontal-alignment: right;
+            }
+            if InstalledState.confirm-id == root.item.id: HorizontalLayout {
+                spacing: Theme.s1;
+                alignment: end;
+                TextButton {
+                    text: "Keep";
+                    clicked => { InstalledState.confirm-id = ""; }
+                }
+                Button {
+                    text: "Delete";
+                    danger: true;
+                    clicked => {
+                        InstalledState.confirm-id = "";
+                        InstalledState.uninstall(root.item.id);
+                    }
+                }
+            }
+        }
+    }
+
+    Rectangle {
+        x: Theme.s1;
+        y: parent.height - 1px;
+        width: parent.width - Theme.s1;
+        height: 1px;
+        background: Theme.border;
+    }
+}
+
+export component InstalledPage inherits Rectangle {
+    background: Theme.bg;
+
+    VerticalLayout {
+        padding: Theme.s3;
+        padding-bottom: 0px;
+        spacing: Theme.s2;
+
+        HorizontalLayout {
+            spacing: Theme.s2;
+            Text {
+                text: "Installed";
+                color: Theme.text;
+                font-size: Theme.text-xl;
+                font-weight: 600;
+                horizontal-stretch: 1;
+            }
+            Text {
+                text: InstalledState.summary;
+                color: Theme.text-muted;
+                font-size: Theme.text-md;
+                vertical-alignment: center;
+            }
+            TextButton {
+                text: "Refresh";
+                clicked => { InstalledState.refresh(); }
+            }
+        }
+
+        if InstalledState.game-running: Rectangle {
+            border-radius: Theme.radius;
+            border-width: 1px;
+            border-color: Theme.accent;
+            background: Theme.raised;
+            HorizontalLayout {
+                padding: Theme.s1;
+                padding-left: Theme.s2;
+                padding-right: Theme.s2;
+                Text {
+                    text: "Deadlock is running. Close it to enable, disable or uninstall mods, then press Refresh.";
+                    color: Theme.text;
+                    font-size: Theme.text-md;
+                    vertical-alignment: center;
+                    wrap: word-wrap;
+                }
+            }
+        }
+
+        if InstalledState.banner-text != "": Rectangle {
+            border-radius: Theme.radius;
+            border-width: 1px;
+            border-color: Theme.border;
+            background: Theme.raised;
+            HorizontalLayout {
+                padding-left: Theme.s2;
+                padding-right: Theme.s1;
+                spacing: Theme.s2;
+                Text {
+                    text: InstalledState.banner-text;
+                    color: Theme.text;
+                    font-size: Theme.text-md;
+                    vertical-alignment: center;
+                    wrap: word-wrap;
+                    horizontal-stretch: 1;
+                }
+                TextButton {
+                    text: "Dismiss";
+                    clicked => { InstalledState.dismiss-banner(); }
+                }
+            }
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+
+            if InstalledState.load-state == LoadState.loading: CenteredMessage {
+                title: "Loading installed mods";
+            }
+
+            if InstalledState.load-state == LoadState.failed: VerticalLayout {
+                alignment: center;
+                spacing: Theme.s2;
+                CenteredMessage {
+                    title: "Couldn't read installed mods";
+                    detail: InstalledState.error-text;
+                }
+                HorizontalLayout {
+                    alignment: center;
+                    Button {
+                        text: "Retry";
+                        primary: true;
+                        clicked => { InstalledState.refresh(); }
+                    }
+                }
+            }
+
+            if InstalledState.load-state == LoadState.ready && InstalledState.rows.length == 0: CenteredMessage {
+                title: "No mods installed";
+                detail: "Mods you install from Browse appear here.";
+            }
+
+            ListView {
+                visible: InstalledState.load-state == LoadState.ready && InstalledState.rows.length > 0;
+                for row in InstalledState.rows: InstalledRowView {
+                    item: row;
+                    locked: InstalledState.game-running || InstalledState.busy;
+                }
+            }
+        }
+    }
+}

@@ -114,22 +114,20 @@ fn catalog_error_text(e: &ApiError) -> String {
     }
 }
 
-fn install_error_text(e: &InstallError) -> String {
+pub(crate) fn install_error_text(e: &InstallError) -> String {
     match e {
         InstallError::GameRunning => "Close Deadlock before installing mods.".into(),
         InstallError::AddonsFull => {
             "The addons folder is full (99 paks). Remove a mod, then try again.".into()
         }
         InstallError::NoVpk => "The download contains no .vpk file to install.".into(),
-        InstallError::UnsupportedArchive => {
-            "The download is not a zip, rar or 7z archive.".into()
-        }
+        InstallError::UnsupportedArchive => "The download is not a zip, rar or 7z archive.".into(),
         InstallError::TooLarge => "The archive is too large to extract safely.".into(),
         other => other.to_string(),
     }
 }
 
-fn game_error_text(e: &GameError) -> String {
+pub(crate) fn game_error_text(e: &GameError) -> String {
     match e {
         GameError::NotFound => "Deadlock was not found in any Steam library.".into(),
         other => other.to_string(),
@@ -228,7 +226,7 @@ fn thumb_worker(shared: &(Mutex<ThumbQueue>, Condvar), cache: &thumbs::Cache, we
     }
 }
 
-fn to_slint(img: &thumbs::Image) -> slint::Image {
+pub(crate) fn to_slint(img: &thumbs::Image) -> slint::Image {
     let buf =
         SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(img.rgba(), img.width(), img.height());
     slint::Image::from_rgba8(buf)
@@ -415,7 +413,7 @@ fn run_install(
     mut post: impl FnMut(Update),
 ) -> Result<(), Failure> {
     let msg = Failure::Message;
-    let paths = game::locate().map_err(|e| msg(game_error_text(&e)))?;
+    let paths = crate::locate_game().map_err(|e| msg(game_error_text(&e)))?;
     // Checked before downloading too, so a long download is not wasted.
     if game::is_running() {
         return Err(msg(install_error_text(&InstallError::GameRunning)));
@@ -477,7 +475,7 @@ fn run_install(
 
 /// Mod ids with a sidecar in `addons`; empty when the game is not found.
 fn installed_ids() -> HashSet<String> {
-    let Ok(paths) = game::locate() else {
+    let Ok(paths) = crate::locate_game() else {
         return HashSet::new();
     };
     sidecar::group(&paths.addons)
@@ -503,7 +501,7 @@ pub struct Browse {
 }
 
 /// Wire the Browse screen to `app` and start loading the catalog.
-pub fn attach(app: &App, api_url: &str) {
+pub fn attach(app: &App, api_url: &str) -> Arc<thumbs::Cache> {
     let weak = app.as_weak();
     let cache = Arc::new(thumbs::Cache::new(THUMB_BUDGET));
     let list = Rc::new(ModList {
@@ -512,7 +510,7 @@ pub fn attach(app: &App, api_url: &str) {
         in_flight: RefCell::new(HashMap::new()),
         installed: RefCell::new(HashSet::new()),
         loader: ThumbLoader::start(cache.clone(), weak.clone()),
-        cache,
+        cache: cache.clone(),
         notify: ModelNotify::default(),
     });
     let browse = Rc::new(Browse {
@@ -551,6 +549,7 @@ pub fn attach(app: &App, api_url: &str) {
     state.on_dismiss_banner(handle(|b| b.set_banner("")));
 
     browse.load();
+    cache
 }
 
 impl Browse {
@@ -647,7 +646,11 @@ impl Browse {
         let summary = if shown == total {
             format!("{} mods", fmt_count(total as u64))
         } else {
-            format!("{} of {} mods", fmt_count(shown as u64), fmt_count(total as u64))
+            format!(
+                "{} of {} mods",
+                fmt_count(shown as u64),
+                fmt_count(total as u64)
+            )
         };
         self.with_state(|s| s.set_summary(summary.into()));
     }
