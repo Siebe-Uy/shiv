@@ -19,8 +19,10 @@ chrono = { version = "0.4", features = ["serde"] }
 tempfile = "3"
 keyvalues-parser = "0.2"
 vpk-parser = { path = "../vpk-parser" }
+kv-parser = { path = "../kv-parser" }
+shiv-core = { path = "../shiv-core" }
+hex = "0.4"
 vpkmanager = { path = "../vpkmanager" }
 source2-model = { path = "../source2-model" }
 
 [dev-dependencies]
-hex = "0.4"

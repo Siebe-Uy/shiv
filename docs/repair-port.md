@@ -59,3 +59,31 @@ The orchestration layer that drove the engine in the old app,
 `mod_manager/manager/localization/` (`health.rs`, `receipt.rs`, `review.rs`,
 `history.rs`, ...), was not copied. It depends on the old manifest, profiles
 and app-data layout. Shiv's `analyze`/`apply` API (Task 9b) replaces it.
+
+## Shiv API (Task 9b)
+
+`crates/shiv-repair/src/api.rs` replaces the old orchestration layer:
+
+- `analyze(paths, build_id) -> Vec<ModHealth>` checks every installed mod
+  (sidecar groups, enabled or disabled) on its own against the installed game,
+  as the old `health.rs::check_mod` did, and returns its status (`Works`,
+  `Fixable`, `NeedsUpdate`, `Fixed`, `NotChecked`), a summary line, one
+  "what changes" line per repair, and the remaining problems. It only reads.
+  `build_id` is `game_build(paths)` (`ClientVersion` from `steam.inf`).
+- `apply(paths, mods) -> Result<FixReport, RepairError>` refuses while the
+  game runs, then builds one package for all loaded mods (engine order: pak
+  number) with repairs on for exactly `mods`, the way the old app did
+  (`build_learning_history`), and writes it to
+  `game/citadel/shiv_repair/pak01_dir.vpk` with a receipt
+  (`shiv-repair.json`) and learned game data (`observed-history.bin`) beside
+  it. `gameinfo.gi` gains one `Game citadel/shiv_repair` line directly before
+  `Game citadel/addons` (old app: `citadel/dmm_localization_*`, mounted first).
+  Mod VPKs are never modified. Existing files that are replaced or removed
+  (package, receipt, learned data, `gameinfo.gi`) are copied first with
+  `repair_backup::create_repair_backup` into `addons/.shiv/repair-backups/`.
+  An empty `mods` list removes the package (after a backup).
+- The old review dialog has no Shiv equivalent: the package keeps the game's
+  load order for choices between mods, and `FixReport::notes` lists what the
+  old app would have asked about.
+- `overlay_state(paths)` says whether the package still matches the installed
+  mods and game build.

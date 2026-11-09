@@ -29,7 +29,7 @@ const PARTIAL_SUFFIXES: [&str; 6] = [
     ".temp",
 ];
 /// The mount mods need: `Game citadel/addons`.
-const ADDONS_SEARCH_PATH: &str = "citadel/addons";
+pub const ADDONS_SEARCH_PATH: &str = "citadel/addons";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum FindingKind {
@@ -316,7 +316,7 @@ fn check_chunk(dir_vpk: &Path, index: u16, need: u64, findings: &mut Vec<Finding
 
 /// Conditions as the Windows game client resolves them (Deadlock runs under
 /// Proton on Linux, so the host OS is irrelevant).
-fn client_symbol(name: &str) -> Option<bool> {
+pub fn client_symbol(name: &str) -> Option<bool> {
     match name.to_ascii_uppercase().as_str() {
         "WIN32" | "WIN64" | "WINDOWS" => Some(true),
         "LINUX" | "OSX" | "OSX64" | "POSIX" | "X360" | "PS3" | "GAMECONSOLE" => Some(false),

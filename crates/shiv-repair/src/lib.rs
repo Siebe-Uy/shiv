@@ -7,10 +7,16 @@
 //! events and `ts-rs` exports were removed and the app-wide error type was
 //! replaced by [`RepairError`]. See `docs/repair-port.md` for what changed.
 
+pub mod api;
 pub mod error;
+pub mod gameinfo;
 pub mod localization_overlay;
 pub mod mod_health;
 pub mod repair_backup;
 pub mod vdata_history;
 
+pub use api::{
+    FixReport, ModHealth, ModId, OverlayState, RepairStatus, analyze, apply, apply_with,
+    game_build, overlay_dir, overlay_state,
+};
 pub use error::RepairError;

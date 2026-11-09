@@ -15,4 +15,8 @@ pub enum RepairError {
     BackupCreationFailed(String),
     #[error("Failed to restore backup: {0}")]
     BackupRestoreFailed(String),
+    #[error("Deadlock is running; close the game before repairing mods")]
+    GameRunning,
+    #[error("{0}")]
+    Gameinfo(String),
 }

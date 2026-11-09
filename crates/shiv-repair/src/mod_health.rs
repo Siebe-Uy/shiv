@@ -326,6 +326,33 @@ impl ModFindings {
         }
     }
 
+    /// The player-facing verdict for these findings.
+    pub fn health(
+        &self,
+        mod_id: &str,
+        choice: CompatibilityChoice,
+        game_build: Option<u32>,
+        checked_at: DateTime<Utc>,
+        source: ModHealthSource,
+    ) -> ModHealth {
+        ModHealth {
+            mod_id: mod_id.to_owned(),
+            status: self.status(choice),
+            symptoms: self
+                .fix_symptoms
+                .union(&self.remaining_symptoms)
+                .copied()
+                .collect(),
+            fix_symptoms: self.fix_symptoms.iter().copied().collect(),
+            remaining_symptoms: self.remaining_symptoms.iter().copied().collect(),
+            repairs: self.repairs,
+            warnings: self.warnings,
+            game_build,
+            checked_at: checked_at.to_rfc3339(),
+            source,
+        }
+    }
+
     pub fn status(&self, choice: CompatibilityChoice) -> ModHealthStatus {
         if self.repairs > 0 {
             match choice {
@@ -445,23 +472,13 @@ impl ProfileHealth {
             .into_iter()
             .filter_map(|(mod_id, key, choice)| {
                 let entry = self.mods.get(mod_id).filter(|entry| entry.key == *key)?;
-                Some(ModHealth {
-                    mod_id: mod_id.to_owned(),
-                    status: entry.findings.status(choice),
-                    symptoms: entry
-                        .findings
-                        .fix_symptoms
-                        .union(&entry.findings.remaining_symptoms)
-                        .copied()
-                        .collect(),
-                    fix_symptoms: entry.findings.fix_symptoms.iter().copied().collect(),
-                    remaining_symptoms: entry.findings.remaining_symptoms.iter().copied().collect(),
-                    repairs: entry.findings.repairs,
-                    warnings: entry.findings.warnings,
-                    game_build: entry.key.game_build,
-                    checked_at: entry.checked_at.to_rfc3339(),
-                    source: entry.source,
-                })
+                Some(entry.findings.health(
+                    mod_id,
+                    choice,
+                    entry.key.game_build,
+                    entry.checked_at,
+                    entry.source,
+                ))
             })
             .collect();
         ModHealthReport {
