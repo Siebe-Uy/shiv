@@ -8,11 +8,18 @@ export component Button inherits Rectangle {
     in property <bool> primary: false;
     // Destructive action: outlined and labelled in the danger colour.
     in property <bool> danger: false;
+    in property <bool> disabled: false;
     callback clicked;
 
     accessible-role: button;
     accessible-label: root.text;
-    accessible-action-default => { root.clicked(); }
+    accessible-action-default => {
+        if (!root.disabled) {
+            root.clicked();
+        }
+    }
+
+    opacity: root.disabled ? 0.4 : 1.0;
 
     height: Theme.control-h;
     min-width: label.preferred-width + 2 * Theme.s2;
@@ -33,6 +40,7 @@ export component Button inherits Rectangle {
     }
 
     ta := TouchArea {
+        enabled: !root.disabled;
         mouse-cursor: pointer;
         clicked => { root.clicked(); }
     }

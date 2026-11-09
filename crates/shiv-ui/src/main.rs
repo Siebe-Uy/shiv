@@ -11,13 +11,15 @@ mod thumbs;
 /// The API serves its routes under `/api` (`/api/v2/mods`, ...).
 const DEFAULT_API_URL: &str = "https://api.deadlockmods.app/api";
 
-/// Where Deadlock lives. `SHIV_GAME_ROOT` (the `Deadlock` folder) overrides the
-/// Steam lookup, for testing against a throwaway install; it redirects installs too.
+/// Where Deadlock lives. In debug builds only, `SHIV_GAME_ROOT` (the `Deadlock`
+/// folder) overrides the Steam lookup, for testing against a throwaway install;
+/// it redirects installs too. Release builds ignore it.
 pub(crate) fn locate_game() -> Result<GamePaths, GameError> {
-    match std::env::var_os("SHIV_GAME_ROOT").filter(|v| !v.is_empty()) {
-        Some(root) => Ok(GamePaths::from_root(root.into())),
-        None => game::locate(),
+    #[cfg(debug_assertions)]
+    if let Some(root) = std::env::var_os("SHIV_GAME_ROOT").filter(|v| !v.is_empty()) {
+        return Ok(GamePaths::from_root(root.into()));
     }
+    game::locate()
 }
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -26,9 +28,13 @@ fn main() -> Result<(), slint::PlatformError> {
     let api_url = std::env::var("SHIV_API_URL").unwrap_or_else(|_| DEFAULT_API_URL.to_owned());
     let cache = browse::attach(&app, &api_url);
     installed::attach(&app, cache);
-    // Open on another screen (e.g. for screenshots); 0 is Browse.
-    if let Some(n) = std::env::var("SHIV_SCREEN").ok().and_then(|v| v.parse().ok()) {
-        app.set_screen(n);
+    // Debug builds only: open on another screen (e.g. for screenshots); 0 is Browse.
+    #[cfg(debug_assertions)]
+    if let Some(n) = std::env::var("SHIV_SCREEN")
+        .ok()
+        .and_then(|v| v.parse::<i32>().ok())
+    {
+        app.set_screen(n.clamp(0, 4));
     }
     app.run()
 }
@@ -132,8 +138,16 @@ mod tests {
         let running = Arc::new(AtomicBool::new(false));
         let located = paths.clone();
         let flag = running.clone();
+        // While set, `locate` (and so every refresh) blocks on its worker thread.
+        let gate = Arc::new(AtomicBool::new(false));
+        let gate_in = gate.clone();
         let deps = installed::Deps {
-            locate: Arc::new(move || Ok(located.clone())),
+            locate: Arc::new(move || {
+                while gate_in.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Ok(located.clone())
+            }),
             running: Arc::new(move || flag.load(Ordering::Relaxed)),
         };
         let app = App::new().expect("app");
@@ -189,18 +203,52 @@ mod tests {
         assert!(exists("pak01_dir.vpk") && exists("pak01_000.vpk"));
         assert!(!exists("pak01_dir.vpk.disabled"));
 
+        // A second toggle while the follow-up refresh is pending is dropped, so
+        // it cannot act on stale state; the disk matches the one accepted action.
+        gate.store(true, Ordering::Relaxed);
+        state.invoke_toggle("m1".into());
+        assert!(state.get_busy());
+        state.invoke_toggle("m1".into()); // ignored: busy
+        run_until(&app, Duration::from_millis(500), |_| false);
+        assert!(exists("pak01_dir.vpk.disabled"), "first toggle ran");
+        assert!(state.get_busy(), "still busy while the refresh is pending");
+        state.invoke_toggle("m1".into()); // acted-on but refresh pending: still ignored
+        run_until(&app, Duration::from_millis(300), |_| false);
+        assert!(exists("pak01_dir.vpk.disabled") && !exists("pak01_dir.vpk"));
+        gate.store(false, Ordering::Relaxed);
+        assert!(run_until(&app, Duration::from_secs(20), |a| {
+            let s = a.global::<InstalledState>();
+            !s.get_busy() && s.get_rows().row_data(0).is_some_and(|r| !r.enabled)
+        }));
+        state.invoke_toggle("m1".into());
+        assert!(run_until(&app, Duration::from_secs(20), |a| {
+            let s = a.global::<InstalledState>();
+            !s.get_busy() && s.get_rows().row_data(0).is_some_and(|r| r.enabled)
+        }));
+        assert!(exists("pak01_dir.vpk"));
+
         // Game running: refresh picks it up; actions are refused with an explanation.
         running.store(true, Ordering::Relaxed);
         state.invoke_refresh();
         assert!(run_until(&app, Duration::from_secs(20), |a| a
             .global::<InstalledState>()
             .get_game_running()));
+        assert!(!state.get_busy());
+        // The worker re-checks the game: the toggle is refused...
         state.invoke_toggle("m1".into());
+        assert!(run_until(&app, Duration::from_secs(20), |a| {
+            let s = a.global::<InstalledState>();
+            !s.get_busy() && s.get_banner_text() != ""
+        }));
+        assert!(state.get_banner_text().starts_with("Could not disable"));
+        click(&app, "Dismiss");
+        // ...and so is the uninstall, through the GameRunning mapping.
         state.invoke_uninstall("m1".into());
         assert!(run_until(&app, Duration::from_secs(20), |a| {
             let s = a.global::<InstalledState>();
             !s.get_busy() && s.get_banner_text() != ""
         }));
+        assert!(state.get_banner_text().starts_with("Could not uninstall"));
         assert!(state.get_banner_text().contains("Deadlock is running"));
         assert!(exists("pak01_dir.vpk") && addons.join(".shiv/m1.json").exists());
         assert_eq!(enabled(&app, 0), Some(true));

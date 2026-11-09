@@ -139,8 +139,8 @@ component InstalledRowView inherits Rectangle {
                 Button {
                     text: "Delete";
                     danger: true;
+                    disabled: root.locked;
                     clicked => {
-                        InstalledState.confirm-id = "";
                         InstalledState.uninstall(root.item.id);
                     }
                 }

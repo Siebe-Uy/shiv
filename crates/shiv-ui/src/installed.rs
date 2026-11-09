@@ -302,6 +302,9 @@ impl Installed {
             if user {
                 s.set_banner_text("".into());
             }
+            // Busy until the result for this generation arrives: actions are
+            // dropped while the entries may be stale.
+            s.set_busy(true);
             // Keep a loaded list on screen while it is re-read.
             if s.get_load_state() != LoadState::Ready {
                 s.set_load_state(LoadState::Loading);
@@ -322,6 +325,7 @@ impl Installed {
 
     fn fail(&self, text: String) {
         self.with_state(|s| {
+            s.set_busy(false);
             s.set_error_text(text.into());
             s.set_load_state(LoadState::Failed);
         });
@@ -339,6 +343,7 @@ impl Installed {
         self.rows
             .set_vec(list.iter().map(|e| self.build_row(e)).collect::<Vec<_>>());
         self.with_state(|s| {
+            s.set_busy(false);
             s.set_game_running(loaded.running);
             s.set_summary(summary(list.len()).into());
             s.set_load_state(LoadState::Ready);
@@ -417,7 +422,11 @@ impl Installed {
         let Some((m, name)) = found else {
             return;
         };
-        self.with_state(|s| s.set_busy(true));
+        self.with_state(|s| {
+            s.set_busy(true);
+            // The confirmation is consumed only once the action is accepted.
+            s.set_confirm_id(SharedString::new());
+        });
         let deps = self.deps.clone();
         let weak = self.weak.clone();
         let started = spawn("shiv-installed-action", move || {
@@ -434,8 +443,8 @@ impl Installed {
     /// Success or failure, re-read the folder: that also refreshes the
     /// game-running state (a game-running refusal means it just started).
     fn acted(&self, result: Result<(), String>) {
+        // `busy` stays set; the refresh below clears it when the list is current.
         self.with_state(|s| {
-            s.set_busy(false);
             if let Err(text) = &result {
                 s.set_banner_text(text.as_str().into());
             }
