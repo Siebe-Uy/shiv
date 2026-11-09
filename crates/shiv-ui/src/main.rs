@@ -5,6 +5,7 @@ slint::include_modules!();
 use shiv_core::game::{self, GameError, GamePaths};
 
 mod browse;
+mod crosshair;
 mod installed;
 mod launch;
 mod repair;
@@ -32,6 +33,7 @@ fn main() -> Result<(), slint::PlatformError> {
     installed::attach(&app, cache);
     launch::attach(&app);
     repair::attach(&app);
+    crosshair::attach(&app);
     // Debug builds only: open on another screen (e.g. for screenshots); 0 is Browse.
     #[cfg(debug_assertions)]
     if let Some(n) = std::env::var("SHIV_SCREEN")
@@ -39,8 +41,11 @@ fn main() -> Result<(), slint::PlatformError> {
         .and_then(|v| v.parse::<i32>().ok())
     {
         app.set_screen(n.clamp(0, 4));
-        if app.get_screen() == 4 {
-            app.global::<RepairState>().invoke_shown();
+        // Setting the screen from Rust does not run `changed screen`.
+        match app.get_screen() {
+            2 => app.global::<CrosshairState>().invoke_shown(),
+            4 => app.global::<RepairState>().invoke_shown(),
+            _ => {}
         }
     }
     app.run()
@@ -131,6 +136,7 @@ mod tests {
         installed_screen();
         launch_flow();
         repair_flow();
+        crosshair_flow();
     }
 
     /// A tiny install for the repair engine (as in shiv-repair's own tests):
@@ -387,6 +393,192 @@ mod tests {
         );
         assert_eq!(state.get_apply_label().as_str(), "Re-apply repairs");
         assert!(state.get_can_apply());
+    }
+
+    /// Crosshair against a temp autoexec.cfg (never the real one): showing
+    /// the screen loads the managed block off-thread; a slider edit updates
+    /// the values the preview draws and the commands; a running game refuses
+    /// Apply; Apply keeps the user's lines and replaces the block; edits are
+    /// dropped while an apply writes; unapplied edits survive a re-show.
+    fn crosshair_flow() {
+        use shiv_core::crosshair::{self as core, CrosshairConfig};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let paths = shiv_core::game::GamePaths::from_root(temp.path().join("Deadlock"));
+        std::fs::create_dir_all(paths.autoexec.parent().expect("cfg dir")).expect("mkdir");
+        let saved = CrosshairConfig {
+            gap: 5.0,
+            ..CrosshairConfig::default()
+        };
+        let user = "bind mouse4 \"+jump\"\nfps_max 240\n";
+        std::fs::write(
+            &paths.autoexec,
+            format!(
+                "{user}{}\n{}\n{}\n",
+                core::SECTION_START,
+                core::to_commands(&saved),
+                core::SECTION_END
+            ),
+        )
+        .expect("autoexec");
+
+        let running = Arc::new(AtomicBool::new(false));
+        let gate = Arc::new(AtomicBool::new(false));
+        let (flag, gate_in, located) = (running.clone(), gate.clone(), paths.clone());
+        let app = App::new().expect("app");
+        crosshair::attach_with(
+            &app,
+            crosshair::Deps {
+                locate: Arc::new(move || {
+                    while gate_in.load(Ordering::Relaxed) {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Ok(located.clone())
+                }),
+                running: Arc::new(move || flag.load(Ordering::Relaxed)),
+            },
+        );
+        app.show().expect("show");
+        let state = app.global::<CrosshairState>();
+        let idle = |a: &App| {
+            let s = a.global::<CrosshairState>();
+            !s.get_loading() && !s.get_busy()
+        };
+
+        // Defaults until shown; showing reads autoexec.cfg on a worker.
+        assert_eq!(state.get_values().pip_gap, 0.0);
+        // (`changed screen` runs on the event loop, not inside set_screen.)
+        app.set_screen(2);
+        let loaded = |a: &App| {
+            let s = a.global::<CrosshairState>();
+            !s.get_loading() && s.get_values().pip_gap == 5.0
+        };
+        assert!(run_until(&app, Duration::from_secs(20), loaded));
+        let v = state.get_values();
+        assert_eq!(v.pip_gap, 5.0);
+        assert_eq!(v.gap_px, 21.0);
+        assert_eq!(
+            state.get_status().as_str(),
+            "Same as the crosshair in autoexec.cfg"
+        );
+
+        // A slider step (through its accessibility action, like a keyboard
+        // or screen reader would) updates the preview's values at once.
+        let slider = |e: &ElementHandle| {
+            e.accessible_role() == Some(i_slint_backend_testing::AccessibleRole::Slider)
+        };
+        let gap = ElementHandle::find_by_accessible_label(&app, "Gap")
+            .find(slider)
+            .expect("gap slider");
+        assert_eq!(gap.accessible_value().as_deref(), Some("5"));
+        gap.invoke_accessible_increment_action();
+        let v = state.get_values();
+        assert_eq!(v.pip_gap, 6.0);
+        assert_eq!(v.gap_px, 23.0, "preview gap: 11 + 2 per step above 0");
+        assert_eq!(gap.accessible_value().as_deref(), Some("6"));
+        assert!(
+            state
+                .get_commands()
+                .contains("citadel_crosshair_pip_gap 6;")
+        );
+        assert_eq!(state.get_status().as_str(), "Changes not applied yet");
+        eprintln!(
+            "crosshair preview after Gap +1: pip_gap={} gap_px={} commands={}",
+            v.pip_gap,
+            v.gap_px,
+            state.get_commands()
+        );
+        let opacity = ElementHandle::find_by_accessible_label(&app, "Opacity")
+            .find(slider)
+            .expect("opacity slider");
+        opacity.invoke_accessible_decrement_action();
+        assert_eq!(state.get_values().pip_opacity, 0.9);
+        assert_eq!(opacity.accessible_value().as_deref(), Some("90%"));
+        // The switch, not the "Outline" text beside it.
+        ElementHandle::find_by_accessible_label(&app, "Outline")
+            .find(|e| e.accessible_role() == Some(i_slint_backend_testing::AccessibleRole::Switch))
+            .expect("outline switch")
+            .invoke_accessible_default_action();
+        assert!(state.get_values().pip_border);
+        click(&app, "Preset colour 2");
+        assert_eq!(state.get_values().hex.as_str(), "#FF0000");
+        let edited = CrosshairConfig {
+            gap: 6.0,
+            pip_opacity: 0.9,
+            pip_border: true,
+            color: core::Rgb { r: 255, g: 0, b: 0 },
+            ..CrosshairConfig::default()
+        };
+
+        // Re-showing keeps unapplied edits.
+        state.invoke_shown();
+        assert!(state.get_loading());
+        assert!(run_until(&app, Duration::from_secs(20), idle));
+        assert_eq!(state.get_values().pip_gap, 6.0);
+
+        // Game running: Apply is refused and nothing is written.
+        let before = std::fs::read_to_string(&paths.autoexec).expect("read");
+        running.store(true, Ordering::Relaxed);
+        state.invoke_apply();
+        assert!(state.get_busy());
+        assert!(run_until(&app, Duration::from_secs(20), idle));
+        assert!(state.get_result_error());
+        assert!(state.get_result_detail().contains("Deadlock is running"));
+        assert!(state.get_game_running());
+        assert_eq!(
+            std::fs::read_to_string(&paths.autoexec).expect("read"),
+            before
+        );
+        running.store(false, Ordering::Relaxed);
+
+        // Busy guard: while an apply is in flight, edits and a second apply
+        // are dropped.
+        gate.store(true, Ordering::Relaxed);
+        state.invoke_apply();
+        assert!(state.get_busy());
+        state.invoke_edit(CrosshairField::PipGap, 40.0);
+        state.invoke_apply();
+        assert_eq!(state.get_values().pip_gap, 6.0);
+        gate.store(false, Ordering::Relaxed);
+        assert!(run_until(&app, Duration::from_secs(20), idle));
+        assert!(!state.get_result_error(), "{}", state.get_result_detail());
+        assert_eq!(state.get_result_title().as_str(), "Crosshair applied");
+        assert!(!state.get_game_running());
+        assert_eq!(
+            state.get_status().as_str(),
+            "Same as the crosshair in autoexec.cfg"
+        );
+        let text = std::fs::read_to_string(&paths.autoexec).expect("read");
+        assert!(text.starts_with(user), "{text}");
+        assert_eq!(text.matches(core::SECTION_START).count(), 1, "{text}");
+        assert!(text.contains(&core::to_commands(&edited)), "{text}");
+        assert_eq!(core::load(&paths).expect("load"), Some(edited));
+
+        // Reset shows the default; a fresh show (no edits) re-reads the file.
+        click(&app, "Reset to default");
+        assert_eq!(state.get_values().pip_gap, 0.0);
+        click(&app, "Dismiss");
+        assert_eq!(state.get_result_title().as_str(), "");
+        state.invoke_shown();
+        assert!(run_until(&app, Duration::from_secs(20), idle));
+        assert_eq!(state.get_values().pip_gap, 0.0, "unapplied reset is kept");
+        // Applying the reset and showing again reads the default back.
+        state.invoke_apply();
+        assert!(run_until(&app, Duration::from_secs(20), idle));
+        state.invoke_shown();
+        assert!(run_until(&app, Duration::from_secs(20), idle));
+        assert_eq!(state.get_values().pip_gap, 0.0);
+        assert_eq!(
+            core::load(&paths).expect("load"),
+            Some(CrosshairConfig::default())
+        );
+        assert!(
+            std::fs::read_to_string(&paths.autoexec)
+                .expect("read")
+                .starts_with(user)
+        );
     }
 
     /// Launch against a temp install with a fake launcher (Steam is never

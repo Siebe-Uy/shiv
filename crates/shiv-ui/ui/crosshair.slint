@@ -1,0 +1,527 @@
+// Crosshair: edit the game's crosshair with a live preview, then write it to
+// the managed block in autoexec.cfg.
+
+import { ScrollView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Button, TextButton, Slider, Switch } from "widgets.slint";
+
+// The numeric settings a slider edits.
+export enum CrosshairField { red, green, blue, pip-opacity, pip-width, pip-height, pip-gap, dot-opacity, dot-outline-opacity }
+
+// The crosshair as the screen shows it; set from Rust as a whole.
+export struct CrosshairValues {
+    red: int,
+    green: int,
+    blue: int,
+    color: color,
+    // "#RRGGBB".
+    hex: string,
+    pip-border: bool,
+    pip-gap-static: bool,
+    pip-opacity: float,
+    pip-width: float,
+    pip-height: float,
+    pip-gap: float,
+    dot-opacity: float,
+    dot-outline-opacity: float,
+    // Centre to the middle of each pip, in game pixels (from the gap rules).
+    gap-px: float,
+}
+
+export global CrosshairState {
+    in property <CrosshairValues> values;
+    // The console commands Apply writes.
+    in property <string> commands;
+    in property <[color]> presets;
+    // Reading autoexec.cfg on a worker thread.
+    in property <bool> loading;
+    // Writing autoexec.cfg on a worker thread.
+    in property <bool> busy;
+    in property <bool> game-running;
+    // Line under the title: where the shown crosshair came from.
+    in property <string> status;
+    // Outcome of the last apply; "" when none.
+    in property <string> result-title;
+    in property <string> result-detail;
+    in property <bool> result-error;
+
+    // The screen was shown.
+    callback shown();
+    callback edit(CrosshairField, float);
+    callback toggle-border();
+    callback toggle-static();
+    callback pick-preset(int);
+    callback reset();
+    callback apply();
+    callback dismiss-result();
+}
+
+global Format {
+    public pure function one-decimal(v: float) -> string {
+        (v < 0 && round(abs(v) * 10) > 0 ? "-" : "") + floor(round(abs(v) * 10) / 10) + "." + mod(round(abs(v) * 10), 10)
+    }
+
+    public pure function percent(v: float) -> string {
+        round(v * 100) + "%"
+    }
+}
+
+// One pip, centred on (cx, cy). With a border it is drawn as the renderer
+// does: a black bar, then the colour 1 px thinner and 1 px shorter at each end.
+component Pip {
+    in property <length> cx;
+    in property <length> cy;
+    in property <bool> vertical;
+    in property <length> thickness;
+    in property <length> long;
+    in property <length> unit;
+    in property <bool> border;
+    in property <color> tint;
+    in property <float> alpha;
+
+    Rectangle {
+        x: root.cx - self.width / 2;
+        y: root.cy - self.height / 2;
+        width: root.vertical ? root.thickness : root.long;
+        height: root.vertical ? root.long : root.thickness;
+        background: root.border ? Theme.ink.with-alpha(root.alpha) : root.tint.with-alpha(root.alpha);
+    }
+    if root.border: Rectangle {
+        x: root.cx - self.width / 2;
+        y: root.cy - self.height / 2;
+        width: max(0px, root.vertical ? root.thickness - root.unit : root.long - 2 * root.unit);
+        height: max(0px, root.vertical ? root.long - 2 * root.unit : root.thickness - root.unit);
+        background: root.tint.with-alpha(root.alpha);
+    }
+}
+
+// The crosshair at `zoom` times its in-game size, centred in the element.
+export component CrosshairPreview inherits Rectangle {
+    in property <CrosshairValues> v;
+    // Whole-pixel scale that keeps the largest crosshair readable: 2x in a
+    // small window up to 8x on a large one.
+    out property <int> zoom: clamp(floor(min(self.width, self.height) / 1px / 80), 2, 8);
+    property <length> unit: 1px * root.zoom;
+    property <length> cx: round(self.width / 2 / 1px) * 1px;
+    property <length> cy: round(self.height / 2 / 1px) * 1px;
+    property <length> gap: root.v.gap-px * root.unit;
+    property <length> thickness: max(0, root.v.pip-width) * root.unit;
+    property <length> long: max(0, root.v.pip-height) * root.unit;
+    clip: true;
+
+    accessible-role: image;
+    accessible-label: "Crosshair preview";
+
+    // Centre dot: 2 x 2, offset (-1.5, -1) like the renderer.
+    Rectangle {
+        x: root.cx - 1.5 * root.unit;
+        y: root.cy - 1 * root.unit;
+        width: 2 * root.unit;
+        height: 2 * root.unit;
+        background: root.v.color.with-alpha(root.v.dot-opacity);
+    }
+    // Dot outline: an ellipse of radius 3 x 3.25, stroke 1.5.
+    Path {
+        x: root.cx - 4 * root.unit;
+        y: root.cy - 4.25 * root.unit;
+        width: 8 * root.unit;
+        height: 8.5 * root.unit;
+        viewbox-x: -4;
+        viewbox-y: -4.25;
+        viewbox-width: 8;
+        viewbox-height: 8.5;
+        commands: "M -3 0 A 3 3.25 0 1 0 3 0 A 3 3.25 0 1 0 -3 0 Z";
+        stroke: Theme.ink.with-alpha(root.v.dot-outline-opacity);
+        stroke-width: 1.5 * root.unit;
+    }
+
+    for side in [{dx: 0, dy: 1}, {dx: 1, dy: 0}, {dx: -1, dy: 0}, {dx: 0, dy: -1}]: Pip {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        cx: root.cx + side.dx * root.gap;
+        cy: root.cy + side.dy * root.gap;
+        vertical: side.dx == 0;
+        thickness: root.thickness;
+        long: root.long;
+        unit: root.unit;
+        border: root.v.pip-border;
+        tint: root.v.color;
+        alpha: root.v.pip-opacity;
+    }
+}
+
+component Group inherits VerticalLayout {
+    in property <string> title;
+    spacing: Theme.s1;
+    alignment: start;
+    Text {
+        text: root.title;
+        color: Theme.text;
+        font-size: Theme.text-lg;
+        font-weight: 600;
+    }
+    @children
+}
+
+component SwitchRow inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> detail;
+    in property <bool> checked;
+    in property <bool> disabled;
+    callback toggled;
+    spacing: Theme.s2;
+    VerticalLayout {
+        horizontal-stretch: 1;
+        alignment: center;
+        Text {
+            text: root.label;
+            color: Theme.text;
+            font-size: Theme.text-md;
+        }
+        Text {
+            text: root.detail;
+            color: Theme.text-muted;
+            font-size: Theme.text-sm;
+            wrap: word-wrap;
+        }
+    }
+    Switch {
+        y: (parent.height - self.height) / 2;
+        label: root.label;
+        checked: root.checked;
+        disabled: root.disabled;
+        toggled => { root.toggled(); }
+    }
+}
+
+component Swatch inherits Rectangle {
+    in property <color> tint;
+    in property <bool> selected;
+    in property <string> label;
+    callback clicked;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-action-default => { root.clicked(); }
+    width: 24px;
+    height: 24px;
+    border-radius: Theme.radius;
+    border-width: root.selected ? 2px : 1px;
+    border-color: root.selected ? Theme.accent : (ta.has-hover ? Theme.border-strong : Theme.border);
+    Rectangle {
+        x: 4px;
+        y: 4px;
+        width: parent.width - 8px;
+        height: parent.height - 8px;
+        border-radius: 2px;
+        background: root.tint;
+    }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+export component CrosshairPage inherits Rectangle {
+    background: Theme.bg;
+    property <CrosshairValues> v: CrosshairState.values;
+    property <bool> locked: CrosshairState.busy;
+    property <bool> light-backdrop: false;
+
+    VerticalLayout {
+        padding: Theme.s3;
+        spacing: Theme.s2;
+
+        HorizontalLayout {
+            spacing: Theme.s2;
+            VerticalLayout {
+                spacing: 2px;
+                horizontal-stretch: 1;
+                Text {
+                    text: "Crosshair";
+                    color: Theme.text;
+                    font-size: Theme.text-xl;
+                    font-weight: 600;
+                }
+                Text {
+                    text: CrosshairState.busy ? "Writing autoexec.cfg"
+                        : CrosshairState.loading ? "Reading autoexec.cfg"
+                        : CrosshairState.status;
+                    color: Theme.text-muted;
+                    font-size: Theme.text-md;
+                    overflow: elide;
+                }
+            }
+            TextButton {
+                y: (parent.height - self.height) / 2;
+                text: "Reset to default";
+                disabled: root.locked;
+                clicked => { CrosshairState.reset(); }
+            }
+            Button {
+                y: (parent.height - self.height) / 2;
+                text: "Apply crosshair";
+                primary: true;
+                disabled: root.locked || CrosshairState.loading || CrosshairState.game-running;
+                clicked => { CrosshairState.apply(); }
+            }
+        }
+
+        if CrosshairState.game-running: Rectangle {
+            border-radius: Theme.radius;
+            border-width: 1px;
+            border-color: Theme.accent;
+            background: Theme.raised;
+            HorizontalLayout {
+                padding: Theme.s1;
+                padding-left: Theme.s2;
+                padding-right: Theme.s2;
+                Text {
+                    text: "Deadlock is running. Close it to apply a crosshair; you can keep editing meanwhile.";
+                    color: Theme.text;
+                    font-size: Theme.text-md;
+                    wrap: word-wrap;
+                }
+            }
+        }
+
+        if CrosshairState.result-title != "": Rectangle {
+            border-radius: Theme.radius;
+            border-width: 1px;
+            border-color: CrosshairState.result-error ? Theme.danger : Theme.border;
+            background: Theme.raised;
+            HorizontalLayout {
+                padding: Theme.s1;
+                padding-left: Theme.s2;
+                spacing: Theme.s2;
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 2px;
+                    alignment: center;
+                    Text {
+                        text: CrosshairState.result-title;
+                        color: CrosshairState.result-error ? Theme.danger : Theme.text;
+                        font-size: Theme.text-md;
+                        font-weight: 600;
+                        wrap: word-wrap;
+                    }
+                    Text {
+                        text: CrosshairState.result-detail;
+                        visible: CrosshairState.result-detail != "";
+                        color: Theme.text-muted;
+                        font-size: Theme.text-sm;
+                        wrap: word-wrap;
+                    }
+                }
+                TextButton {
+                    text: "Dismiss";
+                    clicked => { CrosshairState.dismiss-result(); }
+                }
+            }
+        }
+
+        HorizontalLayout {
+            vertical-stretch: 1;
+            spacing: Theme.s3;
+
+            VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: Theme.s1;
+
+                Rectangle {
+                    vertical-stretch: 1;
+                    min-height: 200px;
+                    border-radius: Theme.radius-md;
+                    border-width: 1px;
+                    border-color: Theme.border;
+                    background: root.light-backdrop ? Theme.text : Theme.bg-sunken;
+                    clip: true;
+
+                    preview := CrosshairPreview {
+                        x: 1px;
+                        y: 1px;
+                        width: parent.width - 2px;
+                        height: parent.height - 2px;
+                        v: root.v;
+                    }
+
+                    // Outside any layout: the text depends on the preview's size.
+                    Text {
+                        x: Theme.s2;
+                        y: parent.height - self.height - Theme.s1;
+                        width: parent.width - 2 * Theme.s2;
+                        text: "Shown " + preview.zoom + " times larger than in game, default hero";
+                        color: root.light-backdrop ? Theme.bg : Theme.text-muted;
+                        font-size: Theme.text-sm;
+                        overflow: elide;
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: Theme.s2;
+                    Rectangle { horizontal-stretch: 1; }
+                    TextButton {
+                        text: root.light-backdrop ? "Dark backdrop" : "Light backdrop";
+                        clicked => { root.light-backdrop = !root.light-backdrop; }
+                    }
+                }
+
+                Text {
+                    text: CrosshairState.commands;
+                    color: Theme.text-faint;
+                    font-size: Theme.text-sm;
+                    wrap: word-wrap;
+                }
+            }
+
+            ScrollView {
+                width: 340px;
+
+                VerticalLayout {
+                    padding-right: Theme.s2;
+                    spacing: Theme.s3;
+                    alignment: start;
+
+                    Group {
+                        title: "Colour";
+                        HorizontalLayout {
+                            spacing: Theme.s1;
+                            height: 32px;
+                            Rectangle {
+                                width: 32px;
+                                border-radius: Theme.radius;
+                                border-width: 1px;
+                                border-color: Theme.border-strong;
+                                background: root.v.color;
+                            }
+                            Text {
+                                text: root.v.hex;
+                                color: Theme.text;
+                                font-size: Theme.text-md;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                            for c[i] in CrosshairState.presets: Swatch {
+                                y: 4px;
+                                tint: c;
+                                label: "Preset colour " + (i + 1);
+                                selected: c == root.v.color;
+                                clicked => { CrosshairState.pick-preset(i); }
+                            }
+                        }
+                        Slider {
+                            label: "Red";
+                            minimum: 0;
+                            maximum: 255;
+                            value: root.v.red;
+                            value-text: root.v.red;
+                            disabled: root.locked;
+                            changed(x) => { CrosshairState.edit(CrosshairField.red, x); }
+                        }
+                        Slider {
+                            label: "Green";
+                            minimum: 0;
+                            maximum: 255;
+                            value: root.v.green;
+                            value-text: root.v.green;
+                            disabled: root.locked;
+                            changed(x) => { CrosshairState.edit(CrosshairField.green, x); }
+                        }
+                        Slider {
+                            label: "Blue";
+                            minimum: 0;
+                            maximum: 255;
+                            value: root.v.blue;
+                            value-text: root.v.blue;
+                            disabled: root.locked;
+                            changed(x) => { CrosshairState.edit(CrosshairField.blue, x); }
+                        }
+                    }
+
+                    Group {
+                        title: "Pips";
+                        Slider {
+                            label: "Length";
+                            minimum: 0;
+                            maximum: 100;
+                            step: 0.1;
+                            value: root.v.pip-height;
+                            value-text: Format.one-decimal(root.v.pip-height);
+                            disabled: root.locked;
+                            changed(x) => { CrosshairState.edit(CrosshairField.pip-height, x); }
+                        }
+                        Slider {
+                            label: "Thickness";
+                            minimum: 0;
+                            maximum: 100;
+                            step: 0.1;
+                            value: root.v.pip-width;
+                            value-text: Format.one-decimal(root.v.pip-width);
+                            disabled: root.locked;
+                            changed(x) => { CrosshairState.edit(CrosshairField.pip-width, x); }
+                        }
+                        Slider {
+                            label: "Gap";
+                            minimum: -20;
+                            maximum: 50;
+                            value: root.v.pip-gap;
+                            value-text: round(root.v.pip-gap);
+                            disabled: root.locked;
+                            changed(x) => { CrosshairState.edit(CrosshairField.pip-gap, x); }
+                        }
+                        Slider {
+                            label: "Opacity";
+                            minimum: 0;
+                            maximum: 1;
+                            step: 0.1;
+                            value: root.v.pip-opacity;
+                            value-text: Format.percent(root.v.pip-opacity);
+                            disabled: root.locked;
+                            changed(x) => { CrosshairState.edit(CrosshairField.pip-opacity, x); }
+                        }
+                        SwitchRow {
+                            label: "Outline";
+                            detail: "A black border around each pip.";
+                            checked: root.v.pip-border;
+                            disabled: root.locked;
+                            toggled => { CrosshairState.toggle-border(); }
+                        }
+                        SwitchRow {
+                            label: "Static gap";
+                            detail: "Measure the gap from the centre instead of from the hero's default spacing.";
+                            checked: root.v.pip-gap-static;
+                            disabled: root.locked;
+                            toggled => { CrosshairState.toggle-static(); }
+                        }
+                    }
+
+                    Group {
+                        title: "Centre dot";
+                        Slider {
+                            label: "Dot opacity";
+                            minimum: 0;
+                            maximum: 1;
+                            step: 0.1;
+                            value: root.v.dot-opacity;
+                            value-text: Format.percent(root.v.dot-opacity);
+                            disabled: root.locked;
+                            changed(x) => { CrosshairState.edit(CrosshairField.dot-opacity, x); }
+                        }
+                        Slider {
+                            label: "Outline opacity";
+                            minimum: 0;
+                            maximum: 1;
+                            step: 0.1;
+                            value: root.v.dot-outline-opacity;
+                            value-text: Format.percent(root.v.dot-outline-opacity);
+                            disabled: root.locked;
+                            changed(x) => { CrosshairState.edit(CrosshairField.dot-outline-opacity, x); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

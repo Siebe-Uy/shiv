@@ -5,8 +5,9 @@ import { BrowsePage, BrowseState, ModRow, LoadState, InstallState } from "browse
 import { InstalledPage, InstalledState, InstalledRow } from "installed.slint";
 import { LaunchPanel, LaunchDialog, LaunchState, FindingRow } from "launch.slint";
 import { RepairPage, RepairDialog, RepairState, RepairRow, RepairTone } from "repair.slint";
+import { CrosshairPage, CrosshairState, CrosshairValues, CrosshairField } from "crosshair.slint";
 
-export { BrowseState, ModRow, LoadState, InstallState, InstalledState, InstalledRow, LaunchState, FindingRow, RepairState, RepairRow, RepairTone }
+export { BrowseState, ModRow, LoadState, InstallState, InstalledState, InstalledRow, LaunchState, FindingRow, RepairState, RepairRow, RepairTone, CrosshairState, CrosshairValues, CrosshairField }
 
 component NavItem inherits Rectangle {
     in property <string> label;
@@ -100,6 +101,9 @@ export component App inherits Window {
         if (root.screen == 1) {
             InstalledState.refresh();
         }
+        if (root.screen == 2) {
+            CrosshairState.shown();
+        }
         if (root.screen == 4) {
             RepairState.shown();
         }
@@ -163,6 +167,12 @@ export component App inherits Window {
                 visible: root.screen == 1;
             }
 
+            CrosshairPage {
+                width: parent.width;
+                height: parent.height;
+                visible: root.screen == 2;
+            }
+
             RepairPage {
                 width: parent.width;
                 height: parent.height;
@@ -172,7 +182,7 @@ export component App inherits Window {
             for name[i] in root.screens: Placeholder {
                 width: parent.width;
                 height: parent.height;
-                visible: i > 1 && i < 4 && root.screen == i;
+                visible: i == 3 && root.screen == i;
                 title: name;
             }
         }
