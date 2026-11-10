@@ -1,0 +1,71 @@
+name: Release
+
+# Pushing a tag like v0.1.0 builds the AppImage and publishes a GitHub release.
+# Running the workflow by hand builds the AppImage and keeps it as an artifact
+# only, so the packaging can be tested without releasing anything.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Pinned and verified below. Bump together when updating the tools.
+  LINUXDEPLOY_URL: https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20250213-2/linuxdeploy-x86_64.AppImage
+  LINUXDEPLOY_SHA256: 4648f278ab3ef31f819e67c30d50f462640e5365a77637d7e6f2ad9fd0b4522a
+  APPIMAGE_PLUGIN_URL: https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-x86_64.AppImage
+  APPIMAGE_PLUGIN_SHA256: 49d6a17160675a6bd1781699aae6bdf7692d98552e02a3671d2183d10547842e
+
+jobs:
+  appimage:
+    # An old glibc, so the AppImage also runs on older distributions.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfontconfig1-dev libxkbcommon-dev libwayland-dev pkg-config librsvg2-bin
+      - name: Rust toolchain
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      - name: Install linuxdeploy
+        run: |
+          mkdir -p "$HOME/bin"
+          curl -fsSL -o "$HOME/bin/linuxdeploy" "$LINUXDEPLOY_URL"
+          curl -fsSL -o "$HOME/bin/linuxdeploy-plugin-appimage" "$APPIMAGE_PLUGIN_URL"
+          echo "$LINUXDEPLOY_SHA256  $HOME/bin/linuxdeploy" | sha256sum -c -
+          echo "$APPIMAGE_PLUGIN_SHA256  $HOME/bin/linuxdeploy-plugin-appimage" | sha256sum -c -
+          chmod +x "$HOME/bin/"*
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+      - name: Build the AppImage
+        env:
+          # The runner has no FUSE: let the tools unpack themselves instead.
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          version=""
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then version="${GITHUB_REF_NAME#v}"; fi
+          packaging/build-appimage.sh "$version"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: appimage
+          path: dist/*
+
+  publish:
+    if: github.ref_type == 'tag'
+    needs: appimage
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: appimage
+          path: dist
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "Shiv ${GITHUB_REF_NAME#v}" --generate-notes

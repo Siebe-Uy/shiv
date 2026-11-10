@@ -4,7 +4,7 @@ Date: 2026-11-10. Machine: Arch/Omarchy, Hyprland (Wayland). Monitors: DP-1 2560
 
 ## Binary
 
-`cargo build --release -p shiv-ui`: `target/release/shiv_ui` = 34,870,264 bytes (33.3 MiB); after fix round 1, 34,875,576 bytes.
+`cargo build --release -p shiv-ui`: `target/release/shiv` = 34,870,264 bytes (33.3 MiB); after fix round 1, 34,875,576 bytes.
 
 ## Method
 

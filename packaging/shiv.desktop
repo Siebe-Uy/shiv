@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Shiv
+GenericName=Deadlock Mod Manager
+Comment=Lean, fast mod manager for Deadlock
+Exec=shiv
+Icon=shiv
+Terminal=false
+Categories=Game;Utility;
+Keywords=Deadlock;Mods;Valve;
+StartupWMClass=shiv
