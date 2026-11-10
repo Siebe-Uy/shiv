@@ -1,0 +1,303 @@
+// Profiles: separate addons folders, one active at a time.
+
+import { ListView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Button, TextButton, SearchField } from "widgets.slint";
+import { LoadState, CenteredMessage } from "browse.slint";
+
+export struct ProfileRow {
+    id: string,
+    name: string,
+    // "12 mods".
+    detail: string,
+    active: bool,
+}
+
+export global ProfilesState {
+    in property <bool> supported: true;
+    // Profiles were turned on: the addons folder is a link to the active one.
+    in property <bool> set-up: false;
+    in property <LoadState> load-state: LoadState.loading;
+    in property <string> error-text;
+    in property <string> banner-text;
+    in property <[ProfileRow]> rows;
+    // Names and the active index, for the sidebar's quick switch.
+    in property <[string]> names;
+    in property <int> active-index: 0;
+    in property <bool> busy;
+    in property <bool> game-running;
+    // Row waiting for delete confirmation / being renamed, "" when none.
+    in-out property <string> confirm-id;
+    in-out property <string> rename-id;
+
+    callback shown();
+    callback setup();
+    callback switch-to(string);
+    callback switch-index(int);
+    callback create(string);
+    callback duplicate(string);
+    callback rename(string, string);
+    callback remove(string);
+    callback dismiss-banner();
+}
+
+component ProfileRowView inherits Rectangle {
+    in property <ProfileRow> item;
+    in property <bool> locked;
+    property <string> draft: root.item.name;
+
+    height: 64px + 2 * Theme.s1 + 1px;
+
+    HorizontalLayout {
+        padding: Theme.s1;
+        padding-left: Theme.s2;
+        padding-right: Theme.s2;
+        spacing: Theme.s2;
+
+        VerticalLayout {
+            alignment: center;
+            spacing: Theme.s1;
+            horizontal-stretch: 1;
+
+            if ProfilesState.rename-id != root.item.id: HorizontalLayout {
+                spacing: Theme.s1;
+                Text {
+                    text: root.item.name;
+                    color: Theme.text;
+                    font-size: Theme.text-lg;
+                    font-weight: 600;
+                    overflow: elide;
+                    max-width: self.preferred-width;
+                }
+                if root.item.active: Text {
+                    text: "Active";
+                    color: Theme.accent;
+                    font-size: Theme.text-sm;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                }
+                Rectangle { horizontal-stretch: 1; }
+            }
+            if ProfilesState.rename-id == root.item.id: SearchField {
+                placeholder: "Profile name";
+                text: root.item.name;
+                edited(t) => { root.draft = t; }
+            }
+            Text {
+                text: root.item.detail;
+                color: Theme.text-muted;
+                font-size: Theme.text-md;
+            }
+        }
+
+        HorizontalLayout {
+            spacing: Theme.s1;
+            alignment: end;
+
+            if ProfilesState.confirm-id == root.item.id: Text {
+                text: "Delete this profile and its mods?";
+                color: Theme.text;
+                font-size: Theme.text-md;
+                vertical-alignment: center;
+            }
+            if ProfilesState.confirm-id == root.item.id: TextButton {
+                text: "Keep";
+                clicked => { ProfilesState.confirm-id = ""; }
+            }
+            if ProfilesState.confirm-id == root.item.id: Button {
+                text: "Delete";
+                danger: true;
+                disabled: root.locked;
+                clicked => {
+                    ProfilesState.confirm-id = "";
+                    ProfilesState.remove(root.item.id);
+                }
+            }
+
+            if ProfilesState.rename-id == root.item.id: TextButton {
+                text: "Cancel";
+                clicked => { ProfilesState.rename-id = ""; }
+            }
+            if ProfilesState.rename-id == root.item.id: Button {
+                text: "Save";
+                disabled: root.locked;
+                clicked => {
+                    ProfilesState.rename-id = "";
+                    ProfilesState.rename(root.item.id, root.draft);
+                }
+            }
+
+            if ProfilesState.confirm-id != root.item.id && ProfilesState.rename-id != root.item.id: HorizontalLayout {
+                spacing: Theme.s1;
+                alignment: end;
+                if !root.item.active: Button {
+                    text: "Switch";
+                    primary: true;
+                    disabled: root.locked;
+                    clicked => { ProfilesState.switch-to(root.item.id); }
+                }
+                TextButton {
+                    text: "Rename";
+                    disabled: root.locked;
+                    clicked => { ProfilesState.rename-id = root.item.id; }
+                }
+                TextButton {
+                    text: "Duplicate";
+                    disabled: root.locked;
+                    clicked => { ProfilesState.duplicate(root.item.id); }
+                }
+                if !root.item.active: TextButton {
+                    text: "Delete";
+                    disabled: root.locked;
+                    clicked => { ProfilesState.confirm-id = root.item.id; }
+                }
+            }
+        }
+    }
+
+    Rectangle {
+        x: Theme.s1;
+        y: parent.height - 1px;
+        width: parent.width - Theme.s1;
+        height: 1px;
+        background: Theme.border;
+    }
+}
+
+export component ProfilesPage inherits Rectangle {
+    background: Theme.bg;
+    property <bool> locked: ProfilesState.busy || ProfilesState.game-running;
+
+    VerticalLayout {
+        padding: Theme.s3;
+        padding-bottom: 0px;
+        spacing: Theme.s2;
+
+        Text {
+            text: "Profiles";
+            color: Theme.text;
+            font-size: Theme.text-xl;
+            font-weight: 600;
+        }
+        Text {
+            text: "Each profile has its own set of installed mods. Switching changes which mods the game loads.";
+            color: Theme.text-muted;
+            font-size: Theme.text-md;
+            wrap: word-wrap;
+        }
+
+        if ProfilesState.game-running: Rectangle {
+            border-radius: Theme.radius;
+            border-width: 1px;
+            border-color: Theme.accent;
+            background: Theme.raised;
+            HorizontalLayout {
+                padding: Theme.s1;
+                padding-left: Theme.s2;
+                padding-right: Theme.s2;
+                Text {
+                    text: "Deadlock is running. Close it to change profiles.";
+                    color: Theme.text;
+                    font-size: Theme.text-md;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        if ProfilesState.banner-text != "": Rectangle {
+            border-radius: Theme.radius;
+            border-width: 1px;
+            border-color: Theme.border;
+            background: Theme.raised;
+            HorizontalLayout {
+                padding-left: Theme.s2;
+                padding-right: Theme.s1;
+                spacing: Theme.s2;
+                Text {
+                    text: ProfilesState.banner-text;
+                    color: Theme.text;
+                    font-size: Theme.text-md;
+                    vertical-alignment: center;
+                    wrap: word-wrap;
+                    horizontal-stretch: 1;
+                }
+                TextButton {
+                    text: "Dismiss";
+                    clicked => { ProfilesState.dismiss-banner(); }
+                }
+            }
+        }
+
+        if ProfilesState.load-state == LoadState.ready && !ProfilesState.supported: CenteredMessage {
+            title: "Profiles are not available here";
+            detail: "They need symbolic links, which this platform does not support yet.";
+        }
+
+        if ProfilesState.load-state == LoadState.ready && ProfilesState.supported && !ProfilesState.set-up: VerticalLayout {
+            spacing: Theme.s2;
+            alignment: start;
+            Text {
+                text: "Turning profiles on moves your current mods into a profile called Default and makes the game's addons folder a link to the active profile. Nothing is deleted, and your mods keep working.";
+                color: Theme.text;
+                font-size: Theme.text-md;
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
+                alignment: start;
+                Button {
+                    text: "Turn on profiles";
+                    primary: true;
+                    disabled: root.locked;
+                    clicked => { ProfilesState.setup(); }
+                }
+            }
+        }
+
+        if ProfilesState.load-state == LoadState.ready && ProfilesState.set-up: HorizontalLayout {
+            spacing: Theme.s1;
+            new-name := SearchField {
+                horizontal-stretch: 1;
+                placeholder: "New profile name";
+            }
+            Button {
+                text: "Create";
+                disabled: root.locked || new-name.text == "";
+                clicked => {
+                    ProfilesState.create(new-name.text);
+                    new-name.text = "";
+                }
+            }
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+
+            if ProfilesState.load-state == LoadState.loading: CenteredMessage {
+                title: "Loading profiles";
+            }
+            if ProfilesState.load-state == LoadState.failed: VerticalLayout {
+                alignment: center;
+                spacing: Theme.s2;
+                CenteredMessage {
+                    title: "Couldn't read profiles";
+                    detail: ProfilesState.error-text;
+                }
+                HorizontalLayout {
+                    alignment: center;
+                    Button {
+                        text: "Retry";
+                        primary: true;
+                        clicked => { ProfilesState.shown(); }
+                    }
+                }
+            }
+
+            if ProfilesState.load-state == LoadState.ready && ProfilesState.set-up: ListView {
+                for row[i] in ProfilesState.rows: ProfileRowView {
+                    item: row;
+                    locked: root.locked;
+                }
+            }
+        }
+    }
+}

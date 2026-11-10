@@ -1,4 +1,4 @@
-// Application shell: sidebar navigation over five screens.
+// Application shell: sidebar navigation over six screens.
 
 import { Theme } from "theme.slint";
 import { BrowsePage, BrowseState, ModRow, LoadState, InstallState, DownloadPicker, DownloadRow, ModDetail, GalleryThumb, HeroOption, ImageState, TabLoad, TextRow } from "browse.slint";
@@ -6,9 +6,11 @@ import { InstalledPage, InstalledState, InstalledRow } from "installed.slint";
 import { LaunchPanel, LaunchDialog, LaunchState, FindingRow } from "launch.slint";
 import { RepairPage, RepairDialog, RepairState, RepairRow, RepairTone } from "repair.slint";
 import { CrosshairPage, CrosshairState, CrosshairValues, CrosshairField } from "crosshair.slint";
+import { ProfilesPage, ProfilesState, ProfileRow } from "profiles.slint";
+import { Dropdown } from "widgets.slint";
 import { PerformancePage, PerfState, PerfTier, PerfRow, PerfControl, PerfEditor, PerfChange } from "performance.slint";
 
-export { BrowseState, ModRow, LoadState, InstallState, DownloadRow, ModDetail, GalleryThumb, HeroOption, ImageState, TabLoad, TextRow, InstalledState, InstalledRow, LaunchState, FindingRow, RepairState, RepairRow, RepairTone, CrosshairState, CrosshairValues, CrosshairField, PerfState, PerfTier, PerfRow, PerfControl, PerfEditor, PerfChange }
+export { BrowseState, ModRow, LoadState, InstallState, DownloadRow, ModDetail, GalleryThumb, HeroOption, ImageState, TabLoad, TextRow, InstalledState, InstalledRow, LaunchState, FindingRow, RepairState, RepairRow, RepairTone, CrosshairState, CrosshairValues, CrosshairField, PerfState, PerfTier, PerfRow, PerfControl, PerfEditor, PerfChange, ProfilesState, ProfileRow }
 
 component NavItem inherits Rectangle {
     in property <string> label;
@@ -74,7 +76,7 @@ export component App inherits Window {
     default-font-size: Theme.text-md;
 
     in-out property <int> screen: 0;
-    property <[string]> screens: ["Browse", "Installed", "Crosshair", "Performance", "Repair"];
+    property <[string]> screens: ["Browse", "Installed", "Crosshair", "Performance", "Repair", "Profiles"];
 
     // Re-read the addons folder whenever the Installed screen is shown.
     changed screen => {
@@ -94,6 +96,9 @@ export component App inherits Window {
         }
         if (root.screen == 4) {
             RepairState.shown();
+        }
+        if (root.screen == 5) {
+            ProfilesState.shown();
         }
         LaunchState.refresh();
     }
@@ -118,6 +123,13 @@ export component App inherits Window {
                         source: @image-url("assets/shiv-wordmark.svg");
                         image-fit: contain;
                     }
+                }
+
+                if ProfilesState.set-up: Dropdown {
+                    label: "Profile";
+                    options: ProfilesState.names;
+                    current-index: ProfilesState.active-index;
+                    selected(i) => { ProfilesState.switch-index(i); }
                 }
 
                 for name[i] in root.screens: NavItem {
@@ -174,6 +186,12 @@ export component App inherits Window {
                 width: parent.width;
                 height: parent.height;
                 visible: root.screen == 3;
+            }
+
+            ProfilesPage {
+                width: parent.width;
+                height: parent.height;
+                visible: root.screen == 5;
             }
         }
     }

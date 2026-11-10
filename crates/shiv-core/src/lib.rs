@@ -10,5 +10,6 @@ pub mod launch;
 pub mod link;
 pub mod perf;
 mod platform;
+pub mod profiles;
 pub mod sidecar;
 pub mod vanilla;

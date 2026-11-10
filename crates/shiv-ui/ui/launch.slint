@@ -96,7 +96,7 @@ export component LaunchPanel inherits VerticalLayout {
         clicked => { LaunchState.launch(); }
     }
 
-    if LaunchState.can-launch-vanilla: Button {
+    if LaunchState.can-launch-vanilla: TextButton {
         text: "Launch without mods";
         disabled: LaunchState.busy || LaunchState.running;
         clicked => { LaunchState.launch-vanilla(); }

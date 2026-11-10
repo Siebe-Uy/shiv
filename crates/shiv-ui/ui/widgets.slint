@@ -83,6 +83,7 @@ export component TextButton inherits Rectangle {
 
 export component SearchField inherits Rectangle {
     in property <string> placeholder;
+    in-out property <string> text <=> input.text;
     callback edited(string);
 
     height: Theme.control-h;

@@ -11,6 +11,7 @@ mod detail_tabs;
 mod installed;
 mod launch;
 mod performance;
+mod profiles;
 mod repair;
 mod thumbs;
 
@@ -105,18 +106,20 @@ fn main() -> Result<(), slint::PlatformError> {
     repair::attach(&app);
     crosshair::attach(&app);
     performance::attach(&app, &api_url);
+    profiles::attach(&app);
     // Debug builds only: open on another screen (e.g. for screenshots); 0 is Browse.
     #[cfg(debug_assertions)]
     if let Some(n) = std::env::var("SHIV_SCREEN")
         .ok()
         .and_then(|v| v.parse::<i32>().ok())
     {
-        app.set_screen(n.clamp(0, 4));
+        app.set_screen(n.clamp(0, 5));
         // Setting the screen from Rust does not run `changed screen`.
         match app.get_screen() {
             2 => app.global::<CrosshairState>().invoke_shown(),
             3 => app.global::<PerfState>().invoke_shown(),
             4 => app.global::<RepairState>().invoke_shown(),
+            5 => app.global::<ProfilesState>().invoke_shown(),
             _ => {}
         }
     }
@@ -222,12 +225,19 @@ mod tests {
         assert_eq!(state.get_load_state(), LoadState::Loading);
         assert!(run_until(&app, Duration::from_secs(20), failed));
 
-        for (i, screen) in ["Installed", "Crosshair", "Performance", "Repair", "Browse"]
-            .iter()
-            .enumerate()
+        for (i, screen) in [
+            "Installed",
+            "Crosshair",
+            "Performance",
+            "Repair",
+            "Profiles",
+            "Browse",
+        ]
+        .iter()
+        .enumerate()
         {
             click(&app, screen);
-            assert_eq!(app.get_screen(), ((i + 1) % 5) as i32, "{screen}");
+            assert_eq!(app.get_screen(), ((i + 1) % 6) as i32, "{screen}");
         }
         let api = stub_api();
         install_cancel_and_failure(&api);
@@ -235,6 +245,8 @@ mod tests {
         installed_nsfw_flow(&api);
         download_picker_flow(&api);
         detail_flow();
+        #[cfg(unix)]
+        profiles_flow();
         installed_screen();
         launch_flow();
         repair_flow();
@@ -2488,5 +2500,64 @@ mod tests {
             "{}",
             state.get_banner_text()
         );
+    }
+
+    #[cfg(unix)]
+    fn profiles_flow() {
+        use shiv_core::game::GamePaths;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = GamePaths::from_root(dir.path().to_path_buf());
+        std::fs::create_dir_all(&paths.addons).expect("addons");
+        std::fs::write(paths.addons.join("pak01_dir.vpk"), "x").expect("vpk");
+        let (located, running) = (paths.clone(), Arc::new(AtomicBool::new(false)));
+        let flag = running.clone();
+        let app = App::new().expect("app");
+        profiles::attach_with(
+            &app,
+            profiles::Deps {
+                locate: Arc::new(move || Ok(located.clone())),
+                running: Arc::new(move || flag.load(Ordering::Relaxed)),
+            },
+        );
+        app.show().expect("show");
+        let state = app.global::<ProfilesState>();
+        fn ready(a: &App) -> bool {
+            let s = a.global::<ProfilesState>();
+            s.get_load_state() == LoadState::Ready && !s.get_busy()
+        }
+        assert!(run_until(&app, Duration::from_secs(5), ready));
+        assert!(!state.get_set_up());
+        assert!(paths.addons.join("pak01_dir.vpk").is_file());
+
+        state.invoke_setup();
+        assert!(run_until(&app, Duration::from_secs(5), |a| {
+            ready(a) && a.global::<ProfilesState>().get_set_up()
+        }));
+        assert_eq!(state.get_rows().row_count(), 1);
+        assert_eq!(
+            state.get_rows().row_data(0).unwrap().detail.as_str(),
+            "1 mod"
+        );
+
+        state.invoke_create("Alt".into());
+        assert!(run_until(&app, Duration::from_secs(5), |a| {
+            ready(a) && a.global::<ProfilesState>().get_rows().row_count() == 2
+        }));
+        state.invoke_switch_index(1);
+        assert!(run_until(&app, Duration::from_secs(5), |a| {
+            ready(a) && a.global::<ProfilesState>().get_active_index() == 1
+        }));
+        assert!(!paths.addons.join("pak01_dir.vpk").exists());
+
+        running.store(true, Ordering::Relaxed);
+        state.invoke_switch_index(0);
+        assert!(run_until(&app, Duration::from_secs(5), |a| {
+            a.global::<ProfilesState>()
+                .get_banner_text()
+                .contains("Deadlock is running")
+        }));
+        assert_eq!(state.get_active_index(), 1);
     }
 }
