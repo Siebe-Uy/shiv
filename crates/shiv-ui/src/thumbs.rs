@@ -1,6 +1,8 @@
-//! Thumbnail cache: fetches, decodes to display size and keeps an LRU of
-//! decoded RGBA pixels under a byte budget. Window-free so it is unit-testable;
-//! conversion to `slint::Image` happens at the UI edge.
+//! Image cache: fetches, decodes to display size and keeps an LRU of decoded
+//! RGBA pixels under a byte budget. One instance holds list thumbnails (cover
+//! crop to a fixed size), another the detail page's gallery (fit inside a
+//! box, aspect kept). Window-free so it is unit-testable; conversion to
+//! `slint::Image` happens at the UI edge.
 
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
@@ -21,6 +23,15 @@ const MAX_FAILED: usize = 4096;
 /// the transient memory spike (thumbnail sources are ~530 px wide).
 const MAX_DIMENSION: u32 = 4096;
 const MAX_DECODE_ALLOC: u64 = 64 * 1024 * 1024;
+
+/// How decoded images are sized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shape {
+    /// Scaled and cropped to exactly this size (list thumbnails).
+    Fill(u32, u32),
+    /// Scaled down to fit inside this box, aspect kept; never scaled up.
+    Fit(u32, u32),
+}
 
 /// A decoded thumbnail: tightly packed RGBA8 pixels.
 #[derive(Debug, Clone)]
@@ -101,17 +112,24 @@ impl Inner {
 /// thread, `get` only reads the cache and is safe on the UI thread.
 pub struct Cache {
     max_bytes: usize,
+    shape: Shape,
     fetch: Box<Fetch>,
     inner: Mutex<Inner>,
 }
 
 impl Cache {
+    /// List thumbnails, cover-cropped to `DISPLAY_W` x `DISPLAY_H`.
     pub fn new(max_bytes: usize) -> Self {
+        Self::fetching(max_bytes, Shape::Fill(DISPLAY_W, DISPLAY_H))
+    }
+
+    /// Fetching over HTTP, decoding to `shape`.
+    pub fn fetching(max_bytes: usize, shape: Shape) -> Self {
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(20)))
             .build()
             .into();
-        Self::with_fetcher(max_bytes, move |url| http_get(&agent, url))
+        Self::with_fetcher(max_bytes, move |url| http_get(&agent, url)).shaped(shape)
     }
 
     pub fn with_fetcher(
@@ -120,9 +138,16 @@ impl Cache {
     ) -> Self {
         Self {
             max_bytes,
+            shape: Shape::Fill(DISPLAY_W, DISPLAY_H),
             fetch: Box::new(fetch),
             inner: Mutex::new(Inner::default()),
         }
+    }
+
+    /// The same cache decoding to `shape` instead.
+    pub fn shaped(mut self, shape: Shape) -> Self {
+        self.shape = shape;
+        self
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -144,6 +169,29 @@ impl Cache {
         self.lock().failed.clear();
     }
 
+    /// Drop one decoded image (a result nobody wants any more).
+    pub fn remove(&self, url: &str) {
+        let mut inner = self.lock();
+        if let Some(e) = inner.entries.remove(url) {
+            inner.used -= e.image.rgba.len();
+        }
+    }
+
+    /// Drop every decoded image and remembered failure.
+    pub fn clear(&self) {
+        let mut inner = self.lock();
+        inner.entries = HashMap::new();
+        inner.used = 0;
+        inner.failed = HashSet::new();
+    }
+
+    /// Bytes of decoded pixels held, and how many images.
+    #[cfg(test)]
+    pub fn usage(&self) -> (usize, usize) {
+        let inner = self.lock();
+        (inner.used, inner.entries.len())
+    }
+
     /// Cached image, or fetch and decode it (blocking). The lock is not held
     /// while fetching, so several workers can fetch at once.
     pub fn get_or_fetch(&self, url: &str) -> Option<Image> {
@@ -158,7 +206,7 @@ impl Cache {
         }
         // A panicking decoder (a malformed image) counts as a failed image.
         let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            (self.fetch)(url).and_then(|bytes| decode(&bytes))
+            (self.fetch)(url).and_then(|bytes| decode(&bytes, self.shape))
         }))
         .ok()
         .flatten();
@@ -202,18 +250,33 @@ pub const OBSCURED_H: u32 = DISPLAY_H / 2;
 /// grid and smoothed back up, so nothing of the original survives beyond
 /// broad colour fields. About 32 KB, a fraction of a millisecond to make.
 pub fn obscured(img: &Image) -> Option<Image> {
+    obscure(img, (OBSCURE_W, OBSCURE_H), (OBSCURED_W, OBSCURED_H))
+}
+
+/// [`obscured`] for an image of any size and aspect (the detail gallery):
+/// the longer side is averaged down to 16 cells, the shorter one in
+/// proportion, and the result is a quarter of the original size.
+pub fn obscured_any(img: &Image) -> Option<Image> {
+    let long = img.width.max(img.height).max(1);
+    let cells = |side: u32| (side * OBSCURE_W).div_ceil(long).max(1);
+    let grid = (cells(img.width), cells(img.height));
+    let out = ((img.width / 4).max(1), (img.height / 4).max(1));
+    obscure(img, grid, out)
+}
+
+fn obscure(img: &Image, grid: (u32, u32), out: (u32, u32)) -> Option<Image> {
     let src = image::RgbaImage::from_raw(img.width, img.height, img.rgba.to_vec())?;
-    let small = image::imageops::resize(&src, OBSCURE_W, OBSCURE_H, FilterType::Triangle);
-    let out = image::imageops::resize(&small, OBSCURED_W, OBSCURED_H, FilterType::Triangle);
+    let small = image::imageops::resize(&src, grid.0, grid.1, FilterType::Triangle);
+    let big = image::imageops::resize(&small, out.0, out.1, FilterType::Triangle);
     Some(Image {
-        width: OBSCURED_W,
-        height: OBSCURED_H,
-        rgba: Arc::from(out.into_raw()),
+        width: out.0,
+        height: out.1,
+        rgba: Arc::from(big.into_raw()),
     })
 }
 
-/// Decode and cover-crop to exactly `DISPLAY_W` x `DISPLAY_H`.
-fn decode(bytes: &[u8]) -> Option<Image> {
+/// Decode and size to `shape`.
+fn decode(bytes: &[u8], shape: Shape) -> Option<Image> {
     let mut reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .ok()?;
@@ -223,9 +286,14 @@ fn decode(bytes: &[u8]) -> Option<Image> {
     limits.max_alloc = Some(MAX_DECODE_ALLOC);
     reader.limits(limits);
     let img = reader.decode().ok()?;
-    let rgba = img
-        .resize_to_fill(DISPLAY_W, DISPLAY_H, FilterType::Triangle)
-        .into_rgba8();
+    let rgba = match shape {
+        Shape::Fill(w, h) => img.resize_to_fill(w, h, FilterType::Triangle),
+        Shape::Fit(w, h) if img.width() > w || img.height() > h => {
+            img.resize(w, h, FilterType::Triangle)
+        }
+        Shape::Fit(..) => img,
+    }
+    .into_rgba8();
     let (width, height) = rgba.dimensions();
     Some(Image {
         width,
@@ -335,6 +403,75 @@ mod tests {
             rgba: Arc::from(vec![0u8; 3]),
         };
         assert!(obscured(&bad).is_none());
+    }
+
+    /// The gallery cache: images fit inside the box with their aspect kept
+    /// (small ones stay small), the byte budget holds however many are
+    /// fetched, and `remove`/`clear` give the memory back.
+    #[test]
+    fn fit_cache_keeps_aspect_and_stays_within_budget() {
+        const BOX: (u32, u32) = (960, 540);
+        let full = (BOX.0 * BOX.1 * 4) as usize;
+        let cache = Cache::with_fetcher(3 * full, |url| {
+            Some(match url {
+                "small" => png(300, 200, [1, 2, 3]),
+                "tall" => png(500, 1000, [1, 2, 3]),
+                _ => png(1920, 1080, [9, 9, 9]),
+            })
+        })
+        .shaped(Shape::Fit(BOX.0, BOX.1));
+        let size = |url: &str| {
+            let img = cache.get_or_fetch(url).expect("decoded");
+            (img.width(), img.height())
+        };
+        assert_eq!(size("wide-0"), BOX);
+        assert_eq!(size("small"), (300, 200));
+        assert_eq!(size("tall"), (270, 540));
+        for i in 1..20 {
+            size(&format!("wide-{i}"));
+            let (used, count) = cache.usage();
+            assert!(used <= 3 * full, "{used} over budget");
+            assert!(count <= 5);
+        }
+        // The most recent images are the ones kept.
+        assert!(cache.get("wide-19").is_some() && cache.get("wide-18").is_some());
+        assert!(cache.get("wide-0").is_none());
+        cache.remove("wide-19");
+        assert!(cache.get("wide-19").is_none());
+        assert!(cache.usage().0 <= 2 * full);
+        cache.clear();
+        assert_eq!(cache.usage(), (0, 0));
+    }
+
+    #[test]
+    fn obscured_any_keeps_aspect_and_removes_detail() {
+        let make = |w: u32, h: u32, invert: bool| {
+            let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+            for y in 0..h {
+                for x in 0..w {
+                    let v = if ((x + y) % 2 == 0) != invert { 255 } else { 0 };
+                    rgba.extend_from_slice(&[v, v, v, 255]);
+                }
+            }
+            Image {
+                width: w,
+                height: h,
+                rgba: Arc::from(rgba),
+            }
+        };
+        for (w, h) in [(960, 540), (405, 540), (7, 3)] {
+            let a = obscured_any(&make(w, h, false)).expect("blurred");
+            let b = obscured_any(&make(w, h, true)).expect("blurred");
+            assert_eq!((a.width(), a.height()), ((w / 4).max(1), (h / 4).max(1)));
+            let max_diff = a
+                .rgba()
+                .iter()
+                .zip(b.rgba())
+                .map(|(x, y)| x.abs_diff(*y))
+                .max()
+                .unwrap();
+            assert!(max_diff <= 4, "{w}x{h}: detail leaked ({max_diff})");
+        }
     }
 
     #[test]

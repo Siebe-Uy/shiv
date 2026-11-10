@@ -2,69 +2,11 @@
 
 import { ListView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { Button, TextButton, SearchField, Dropdown, ProgressBar, Switch } from "widgets.slint";
+import { Button, TextButton, SearchField, Dropdown, Switch } from "widgets.slint";
+import { BrowseState, LoadState, InstallState, ModRow, DownloadRow, ModDetail, GalleryThumb, ImageState, InstallControls, NsfwTag } from "browse-common.slint";
+import { ModDetailPage } from "mod-detail.slint";
 
-export enum LoadState { loading, ready, failed }
-
-// `cancelling`: Cancel was pressed and the worker has not finished yet; Install
-// stays disabled until it has, so two workers never install the same mod.
-export enum InstallState { idle, downloading, installing, cancelling, installed, unavailable }
-
-export struct ModRow {
-    id: string,
-    name: string,
-    byline: string,
-    stats: string,
-    // "Updated 2026-11-08", or "" when unknown.
-    updated: string,
-    thumb: image,
-    has-thumb: bool,
-    // Marked NSFW; `thumb` is a blurred copy unless Show NSFW is on.
-    nsfw: bool,
-    state: InstallState,
-    // 0..1, negative when the size is unknown.
-    progress: float,
-    progress-text: string,
-}
-
-// One file in the download picker.
-export struct DownloadRow {
-    name: string,
-    // "2.5 MB", or "Size unknown".
-    size: string,
-}
-
-// Everything the Rust side reads or drives.
-export global BrowseState {
-    in property <[ModRow]> mods;
-    in property <LoadState> load-state: LoadState.loading;
-    in property <string> error-text;
-    in property <string> banner-text;
-    in property <string> summary;
-    in property <[string]> sorts: ["Newest"];
-    in property <[string]> categories: ["All categories"];
-    in-out property <int> sort-index: 0;
-    in-out property <int> category-index: 0;
-    // NSFW thumbnails shown unblurred; off at every start.
-    in property <bool> show-nsfw: false;
-    // Download picker, shown when a mod offers more than one file.
-    in property <bool> picker-open: false;
-    in property <string> picker-title;
-    in property <[DownloadRow]> picker-files;
-
-    callback search-edited(string);
-    callback sort-selected(int);
-    callback category-selected(int);
-    callback retry();
-    callback install(string);
-    callback cancel(string);
-    callback dismiss-banner();
-    callback toggle-nsfw();
-    callback pick-download(int);
-    callback cancel-pick();
-    // The screen was shown: re-read which mods are installed.
-    callback shown();
-}
+export { BrowseState, LoadState, InstallState, ModRow, DownloadRow, ModDetail, GalleryThumb, ImageState }
 
 component ModRowView inherits Rectangle {
     in property <ModRow> item;
@@ -72,7 +14,15 @@ component ModRowView inherits Rectangle {
     height: 135px + 2 * Theme.s1 + 1px;
     background: hover-area.has-hover ? Theme.raised : transparent;
 
-    hover-area := TouchArea { }
+    // Clicking the row (outside its buttons) opens the mod's detail page.
+    accessible-role: list-item;
+    accessible-label: root.item.name;
+    accessible-action-default => { BrowseState.open-detail(root.item.id); }
+
+    hover-area := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { BrowseState.open-detail(root.item.id); }
+    }
 
     HorizontalLayout {
         padding-top: Theme.s1;
@@ -111,19 +61,8 @@ component ModRowView inherits Rectangle {
                     horizontal-stretch: 1;
                     max-width: self.preferred-width;
                 }
-                if root.item.nsfw: Rectangle {
-                    width: nsfw-tag.preferred-width + Theme.s1;
-                    height: nsfw-tag.preferred-height + 4px;
+                if root.item.nsfw: NsfwTag {
                     y: (parent.height - self.height) / 2;
-                    border-radius: Theme.radius;
-                    border-width: 1px;
-                    border-color: Theme.danger;
-                    nsfw-tag := Text {
-                        text: "NSFW";
-                        color: Theme.danger;
-                        font-size: Theme.text-sm;
-                        font-weight: 600;
-                    }
                 }
                 Rectangle { horizontal-stretch: 1; }
             }
@@ -147,55 +86,9 @@ component ModRowView inherits Rectangle {
             }
         }
 
-        VerticalLayout {
+        InstallControls {
             width: 160px;
-            alignment: center;
-            spacing: Theme.s1;
-
-            if root.item.state == InstallState.idle: Button {
-                text: "Install";
-                clicked => { BrowseState.install(root.item.id); }
-            }
-            if root.item.state == InstallState.downloading: ProgressBar {
-                progress: root.item.progress;
-            }
-            if root.item.state == InstallState.downloading: HorizontalLayout {
-                Text {
-                    text: root.item.progress-text;
-                    color: Theme.text-muted;
-                    font-size: Theme.text-sm;
-                    vertical-alignment: center;
-                    horizontal-stretch: 1;
-                }
-                TextButton {
-                    text: "Cancel";
-                    clicked => { BrowseState.cancel(root.item.id); }
-                }
-            }
-            if root.item.state == InstallState.installing: Text {
-                text: "Installing";
-                color: Theme.text-muted;
-                font-size: Theme.text-md;
-                horizontal-alignment: right;
-            }
-            if root.item.state == InstallState.cancelling: Text {
-                text: "Cancelling";
-                color: Theme.text-muted;
-                font-size: Theme.text-md;
-                horizontal-alignment: right;
-            }
-            if root.item.state == InstallState.installed: Text {
-                text: "Installed";
-                color: Theme.text-muted;
-                font-size: Theme.text-md;
-                horizontal-alignment: right;
-            }
-            if root.item.state == InstallState.unavailable: Text {
-                text: "No download";
-                color: Theme.text-faint;
-                font-size: Theme.text-md;
-                horizontal-alignment: right;
-            }
+            item: root.item;
         }
     }
 
@@ -233,128 +126,140 @@ export component CenteredMessage inherits VerticalLayout {
 export component BrowsePage inherits Rectangle {
     background: Theme.bg;
 
-    VerticalLayout {
-        padding: Theme.s3;
-        padding-bottom: 0px;
-        spacing: Theme.s2;
+    // Hidden, not destroyed, while a detail page is open: search text,
+    // filters and scroll position are all still there on Back.
+    list-page := Rectangle {
+        visible: !BrowseState.detail-open;
 
-        HorizontalLayout {
-            Text {
-                text: "Browse";
-                color: Theme.text;
-                font-size: Theme.text-xl;
-                font-weight: 600;
-                horizontal-stretch: 1;
-            }
+        VerticalLayout {
+            padding: Theme.s3;
+            padding-bottom: 0px;
+            spacing: Theme.s2;
+
             HorizontalLayout {
-                horizontal-stretch: 0;
-                spacing: Theme.s1;
-                padding-right: Theme.s3;
                 Text {
+                    text: "Browse";
+                    color: Theme.text;
+                    font-size: Theme.text-xl;
+                    font-weight: 600;
+                    horizontal-stretch: 1;
+                }
+                HorizontalLayout {
                     horizontal-stretch: 0;
-                    text: "Show NSFW";
+                    spacing: Theme.s1;
+                    padding-right: Theme.s3;
+                    Text {
+                        horizontal-stretch: 0;
+                        text: "Show NSFW";
+                        color: Theme.text-muted;
+                        font-size: Theme.text-md;
+                        vertical-alignment: center;
+                    }
+                    Switch {
+                        y: (parent.height - self.height) / 2;
+                        label: "Show NSFW";
+                        checked: BrowseState.show-nsfw;
+                        toggled => { BrowseState.toggle-nsfw(); }
+                    }
+                }
+                Text {
+                    text: BrowseState.summary;
                     color: Theme.text-muted;
                     font-size: Theme.text-md;
                     vertical-alignment: center;
                 }
-                Switch {
-                    y: (parent.height - self.height) / 2;
-                    label: "Show NSFW";
-                    checked: BrowseState.show-nsfw;
-                    toggled => { BrowseState.toggle-nsfw(); }
-                }
             }
-            Text {
-                text: BrowseState.summary;
-                color: Theme.text-muted;
-                font-size: Theme.text-md;
-                vertical-alignment: center;
-            }
-        }
 
-        HorizontalLayout {
-            spacing: Theme.s1;
-            SearchField {
-                horizontal-stretch: 1;
-                placeholder: "Search by name, author or description";
-                edited(text) => { BrowseState.search-edited(text); }
-            }
-            Dropdown {
-                width: 176px;
-                label: "Sort";
-                options: BrowseState.sorts;
-                current-index <=> BrowseState.sort-index;
-                selected(i) => { BrowseState.sort-selected(i); }
-            }
-            Dropdown {
-                width: 208px;
-                label: "Category";
-                options: BrowseState.categories;
-                current-index <=> BrowseState.category-index;
-                selected(i) => { BrowseState.category-selected(i); }
-            }
-        }
-
-        if BrowseState.banner-text != "": Rectangle {
-            border-radius: Theme.radius;
-            border-width: 1px;
-            border-color: Theme.border;
-            background: Theme.raised;
             HorizontalLayout {
-                padding-left: Theme.s2;
-                padding-right: Theme.s1;
-                spacing: Theme.s2;
-                Text {
-                    text: BrowseState.banner-text;
-                    color: Theme.text;
-                    font-size: Theme.text-md;
-                    vertical-alignment: center;
-                    wrap: word-wrap;
+                spacing: Theme.s1;
+                SearchField {
                     horizontal-stretch: 1;
+                    placeholder: "Search by name, author or description";
+                    edited(text) => { BrowseState.search-edited(text); }
                 }
-                TextButton {
-                    text: "Dismiss";
-                    clicked => { BrowseState.dismiss-banner(); }
+                Dropdown {
+                    width: 176px;
+                    label: "Sort";
+                    options: BrowseState.sorts;
+                    current-index <=> BrowseState.sort-index;
+                    selected(i) => { BrowseState.sort-selected(i); }
+                }
+                Dropdown {
+                    width: 208px;
+                    label: "Category";
+                    options: BrowseState.categories;
+                    current-index <=> BrowseState.category-index;
+                    selected(i) => { BrowseState.category-selected(i); }
                 }
             }
-        }
 
-        Rectangle {
-            vertical-stretch: 1;
-
-            if BrowseState.load-state == LoadState.loading: CenteredMessage {
-                title: "Loading mods";
-            }
-
-            if BrowseState.load-state == LoadState.failed: VerticalLayout {
-                alignment: center;
-                spacing: Theme.s2;
-                CenteredMessage {
-                    title: "Couldn't load mods";
-                    detail: BrowseState.error-text;
-                }
+            if BrowseState.banner-text != "": Rectangle {
+                border-radius: Theme.radius;
+                border-width: 1px;
+                border-color: Theme.border;
+                background: Theme.raised;
                 HorizontalLayout {
-                    alignment: center;
-                    Button {
-                        text: "Retry";
-                        primary: true;
-                        clicked => { BrowseState.retry(); }
+                    padding-left: Theme.s2;
+                    padding-right: Theme.s1;
+                    spacing: Theme.s2;
+                    Text {
+                        text: BrowseState.banner-text;
+                        color: Theme.text;
+                        font-size: Theme.text-md;
+                        vertical-alignment: center;
+                        wrap: word-wrap;
+                        horizontal-stretch: 1;
+                    }
+                    TextButton {
+                        text: "Dismiss";
+                        clicked => { BrowseState.dismiss-banner(); }
                     }
                 }
             }
 
-            if BrowseState.load-state == LoadState.ready && BrowseState.mods.length == 0: CenteredMessage {
-                title: "No mods match";
-                detail: "Try a different search or category.";
-            }
+            Rectangle {
+                vertical-stretch: 1;
 
-            ListView {
-                visible: BrowseState.load-state == LoadState.ready && BrowseState.mods.length > 0;
-                for row in BrowseState.mods: ModRowView {
-                    item: row;
+                if BrowseState.load-state == LoadState.loading: CenteredMessage {
+                    title: "Loading mods";
+                }
+
+                if BrowseState.load-state == LoadState.failed: VerticalLayout {
+                    alignment: center;
+                    spacing: Theme.s2;
+                    CenteredMessage {
+                        title: "Couldn't load mods";
+                        detail: BrowseState.error-text;
+                    }
+                    HorizontalLayout {
+                        alignment: center;
+                        Button {
+                            text: "Retry";
+                            primary: true;
+                            clicked => { BrowseState.retry(); }
+                        }
+                    }
+                }
+
+                if BrowseState.load-state == LoadState.ready && BrowseState.mods.length == 0: CenteredMessage {
+                    title: "No mods match";
+                    detail: "Try a different search or category.";
+                }
+
+                mod-list := ListView {
+                    visible: BrowseState.load-state == LoadState.ready && BrowseState.mods.length > 0;
+                    content-y <=> BrowseState.list-scroll;
+                    for row in BrowseState.mods: ModRowView {
+                        item: row;
+                    }
                 }
             }
         }
+    }
+
+    if BrowseState.detail-open: ModDetailPage {
+        width: parent.width;
+        height: parent.height;
     }
 }
 

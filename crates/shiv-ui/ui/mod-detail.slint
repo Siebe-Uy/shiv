@@ -1,0 +1,316 @@
+// Mod detail page: images, facts, description and the install controls.
+// Opened from a Browse row; Back returns to the list as it was.
+
+import { ScrollView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Button, TextButton, Switch } from "widgets.slint";
+import { BrowseState, ModRow, ImageState, InstallControls, NsfwTag } from "browse-common.slint";
+
+component Fact inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> value;
+    spacing: Theme.s2;
+    Text {
+        width: 88px;
+        text: root.label;
+        color: Theme.text-muted;
+        font-size: Theme.text-md;
+    }
+    Text {
+        horizontal-stretch: 1;
+        text: root.value;
+        color: Theme.text;
+        font-size: Theme.text-md;
+        wrap: word-wrap;
+    }
+}
+
+component StripThumb inherits Rectangle {
+    in property <image> source;
+    in property <bool> has-image;
+    in property <bool> selected;
+    in property <int> number;
+    callback picked;
+
+    accessible-role: button;
+    accessible-label: "Image " + root.number;
+    accessible-item-selected: root.selected;
+    accessible-action-default => { root.picked(); }
+
+    width: 96px;
+    height: 54px;
+    border-radius: Theme.radius;
+    clip: true;
+    background: Theme.hover;
+
+    Image {
+        width: parent.width;
+        height: parent.height;
+        source: root.source;
+        image-fit: cover;
+        visible: root.has-image;
+    }
+    // Drawn over the image so the selection stays visible.
+    Rectangle {
+        border-radius: Theme.radius;
+        border-width: root.selected ? 2px : 1px;
+        border-color: root.selected ? Theme.accent : (ta.has-hover ? Theme.border-strong : Theme.border);
+    }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.picked(); }
+    }
+}
+
+export component ModDetailPage inherits Rectangle {
+    background: Theme.bg;
+
+    property <ModRow> item: BrowseState.detail-row[0];
+    property <length> side-width: 272px;
+    // The large image: 16:9 within the space left of the side column.
+    property <length> image-width: max(240px, root.width - 2 * Theme.s3 - root.side-width - Theme.s3 - Theme.s2);
+    property <length> image-height: min(image-width * 9 / 16, 560px);
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape || event.text == Key.Backspace) {
+                BrowseState.close-detail();
+                return accept;
+            }
+            if (event.text == Key.LeftArrow) {
+                BrowseState.gallery-step(-1);
+                return accept;
+            }
+            if (event.text == Key.RightArrow) {
+                BrowseState.gallery-step(1);
+                return accept;
+            }
+            reject
+        }
+    }
+
+    init => { keys.focus(); }
+
+    VerticalLayout {
+        padding: Theme.s3;
+        padding-bottom: 0px;
+        spacing: Theme.s2;
+
+        HorizontalLayout {
+            spacing: Theme.s1;
+            Button {
+                text: "Back";
+                clicked => { BrowseState.close-detail(); }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            if BrowseState.detail.nsfw: HorizontalLayout {
+                horizontal-stretch: 0;
+                spacing: Theme.s1;
+                padding-right: Theme.s2;
+                Text {
+                    horizontal-stretch: 0;
+                    text: "Show NSFW";
+                    color: Theme.text-muted;
+                    font-size: Theme.text-md;
+                    vertical-alignment: center;
+                }
+                nsfw-switch := Switch {
+                    y: (parent.height - self.height) / 2;
+                    label: "Show NSFW";
+                    checked: BrowseState.show-nsfw;
+                    toggled => { BrowseState.toggle-nsfw(); }
+                }
+            }
+        }
+
+        if BrowseState.banner-text != "": Rectangle {
+            border-radius: Theme.radius;
+            border-width: 1px;
+            border-color: Theme.border;
+            background: Theme.raised;
+            HorizontalLayout {
+                padding-left: Theme.s2;
+                padding-right: Theme.s1;
+                spacing: Theme.s2;
+                Text {
+                    text: BrowseState.banner-text;
+                    color: Theme.text;
+                    font-size: Theme.text-md;
+                    vertical-alignment: center;
+                    wrap: word-wrap;
+                    horizontal-stretch: 1;
+                }
+                TextButton {
+                    text: "Dismiss";
+                    clicked => { BrowseState.dismiss-banner(); }
+                }
+            }
+        }
+
+        sv := ScrollView {
+            vertical-stretch: 1;
+            content-width: self.visible-width;
+            content-height: content.preferred-height;
+
+            content := VerticalLayout {
+                width: sv.visible-width;
+                padding-right: Theme.s2;
+                padding-bottom: Theme.s3;
+                spacing: Theme.s3;
+
+                VerticalLayout {
+                    spacing: Theme.s1;
+                    HorizontalLayout {
+                        spacing: Theme.s1;
+                        Text {
+                            text: BrowseState.detail.name;
+                            color: Theme.text;
+                            font-size: Theme.text-xl;
+                            font-weight: 600;
+                            wrap: word-wrap;
+                            horizontal-stretch: 1;
+                            max-width: self.preferred-width;
+                        }
+                        if BrowseState.detail.nsfw: NsfwTag {
+                            y: (parent.height - self.height) / 2;
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                    }
+                    if BrowseState.detail.author != "" || BrowseState.detail.kind != "": Text {
+                        text: BrowseState.detail.author != ""
+                            ? (BrowseState.detail.kind != "" ? "by " + BrowseState.detail.author + " \u{b7} " + BrowseState.detail.kind : "by " + BrowseState.detail.author)
+                            : BrowseState.detail.kind;
+                        color: Theme.text-muted;
+                        font-size: Theme.text-md;
+                        wrap: word-wrap;
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: Theme.s3;
+                    alignment: start;
+
+                    // Gallery.
+                    VerticalLayout {
+                        width: root.image-width;
+                        spacing: Theme.s1;
+                        alignment: start;
+
+                        Rectangle {
+                            height: root.image-height;
+                            border-radius: Theme.radius-md;
+                            clip: true;
+                            background: Theme.raised;
+
+                            Image {
+                                width: parent.width;
+                                height: parent.height;
+                                source: BrowseState.gallery-image;
+                                image-fit: contain;
+                                visible: BrowseState.gallery-state == ImageState.ready;
+                            }
+                            if BrowseState.gallery-state != ImageState.ready: Text {
+                                text: BrowseState.gallery-state == ImageState.loading ? "Loading image"
+                                    : BrowseState.gallery-state == ImageState.failed ? "Image unavailable"
+                                    : "No images";
+                                color: Theme.text-faint;
+                                font-size: Theme.text-md;
+                            }
+                        }
+
+                        if BrowseState.gallery-count > 1: HorizontalLayout {
+                            spacing: Theme.s1;
+                            Button {
+                                text: "Previous";
+                                clicked => { BrowseState.gallery-step(-1); }
+                            }
+                            Text {
+                                horizontal-stretch: 1;
+                                text: (BrowseState.gallery-index + 1) + " / " + BrowseState.gallery-count;
+                                color: Theme.text-muted;
+                                font-size: Theme.text-md;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            Button {
+                                text: "Next";
+                                clicked => { BrowseState.gallery-step(1); }
+                            }
+                        }
+
+                        if BrowseState.gallery-count > 1: Flickable {
+                            height: 54px;
+                            content-width: strip.preferred-width;
+                            content-height: self.height;
+                            strip := HorizontalLayout {
+                                spacing: Theme.s1;
+                                for t[i] in BrowseState.gallery-thumbs: StripThumb {
+                                    source: t.image;
+                                    has-image: t.has-image;
+                                    selected: i == BrowseState.gallery-index;
+                                    number: i + 1;
+                                    picked => { BrowseState.gallery-select(i); }
+                                }
+                            }
+                        }
+                    }
+
+                    // Side column: install and facts.
+                    VerticalLayout {
+                        width: root.side-width;
+                        spacing: Theme.s2;
+                        alignment: start;
+
+                        Rectangle {
+                            height: install-layout.preferred-height;
+                            border-radius: Theme.radius-md;
+                            border-width: 1px;
+                            border-color: Theme.border;
+                            background: Theme.raised;
+                            install-layout := VerticalLayout {
+                                padding: Theme.s2;
+                                status := InstallControls {
+                                    item: root.item;
+                                    primary: true;
+                                }
+                            }
+                        }
+
+                        VerticalLayout {
+                            spacing: Theme.s1;
+                            Fact { label: "Downloads"; value: BrowseState.detail.downloads; }
+                            Fact { label: "Likes"; value: BrowseState.detail.likes; }
+                            if BrowseState.detail.added != "": Fact { label: "Added"; value: BrowseState.detail.added; }
+                            if BrowseState.detail.updated != "": Fact { label: "Updated"; value: BrowseState.detail.updated; }
+                            if BrowseState.detail.tags != "": Fact { label: "Tags"; value: BrowseState.detail.tags; }
+                        }
+
+                        if BrowseState.detail.has-link: HorizontalLayout {
+                            alignment: start;
+                            Button {
+                                text: "Open on GameBanana";
+                                clicked => { BrowseState.open-link(); }
+                            }
+                        }
+                    }
+                }
+
+                VerticalLayout {
+                    spacing: Theme.s1;
+                    Text {
+                        text: "Description";
+                        color: Theme.text;
+                        font-size: Theme.text-lg;
+                        font-weight: 600;
+                    }
+                    Text {
+                        text: BrowseState.detail.description != "" ? BrowseState.detail.description : "No description.";
+                        color: BrowseState.detail.description != "" ? Theme.text : Theme.text-faint;
+                        font-size: Theme.text-md;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+        }
+    }
+}

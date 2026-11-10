@@ -6,6 +6,7 @@ use shiv_core::game::{self, GameError, GamePaths};
 
 mod browse;
 mod crosshair;
+mod describe;
 mod installed;
 mod launch;
 mod performance;
@@ -231,6 +232,7 @@ mod tests {
         install_cancel_and_failure(&api);
         nsfw_flow(&api);
         download_picker_flow(&api);
+        detail_flow();
         installed_screen();
         launch_flow();
         repair_flow();
@@ -1595,6 +1597,369 @@ mod tests {
             }
         });
         url
+    }
+
+    /// A press and release at the middle of `el`, through the window (the
+    /// testing backend's mock click needs mock time, which these tests do not use).
+    fn pointer_click(app: &App, el: &ElementHandle) {
+        let (pos, size) = (el.absolute_position(), el.size());
+        pointer_click_at(app, pos.x + size.width / 2.0, pos.y + size.height / 2.0);
+    }
+
+    fn pointer_click_at(app: &App, x: f32, y: f32) {
+        use slint::platform::{PointerEventButton, WindowEvent};
+        let position = slint::LogicalPosition::new(x, y);
+        let button = PointerEventButton::Left;
+        app.window()
+            .dispatch_event(WindowEvent::PointerMoved { position });
+        app.window()
+            .dispatch_event(WindowEvent::PointerPressed { position, button });
+        app.window()
+            .dispatch_event(WindowEvent::PointerReleased { position, button });
+    }
+
+    fn png_of(w: u32, h: u32) -> Vec<u8> {
+        let img = image::RgbImage::from_fn(w, h, |x, y| {
+            image::Rgb(if (x / 8 + y / 8) % 2 == 0 {
+                [250, 240, 230]
+            } else {
+                [10, 20, 30]
+            })
+        });
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::Png)
+            .expect("encode png");
+        out.into_inner()
+    }
+
+    /// Catalog for the detail page: a mod with three images (the third is a
+    /// 404) and two download files, an NSFW mod with two images, and thirty
+    /// fillers so the list scrolls. Every file URL is a 404, so installs never
+    /// reach an addons folder.
+    fn detail_api() -> String {
+        let server = tiny_http::Server::http("127.0.0.1:0").expect("stub server");
+        let url = format!("http://{}", server.server_addr().to_ip().expect("ip"));
+        let mut mods = vec![
+            format!(
+                r#"{{"id":"m5","remoteId":"5","name":"Gallery Mod","downloadable":true,
+                "author":"Ada","category":"Skins","hero":"Haze","tags":["Sound"," ","Funny"],
+                "likes":56,"downloadCount":1234,"remoteUrl":"https://gamebanana.com/mods/5",
+                "remoteAddedAt":"2026-10-01T10:00:00Z","remoteUpdatedAt":"2026-11-05T09:00:00Z",
+                "description":"<b>Hello</b> &amp; welcome.<br><br><ul><li>One</li><li>Two</li></ul><script>x()</script><a href=\"https://evil.test\">link</a>",
+                "images":["{url}/g1.png","{url}/g2.png","{url}/g3.png"]}}"#
+            ),
+            format!(
+                r#"{{"id":"m6","remoteId":"6","name":"Spicy Gallery","downloadable":true,"isNSFW":true,
+                "remoteUrl":"javascript:alert(1)","images":["{url}/g1.png","{url}/g2.png"]}}"#
+            ),
+        ];
+        for i in 1..=30 {
+            mods.push(format!(
+                r#"{{"id":"f{i}","remoteId":"10{i}","name":"Filler {i:02}","downloadable":true}}"#
+            ));
+        }
+        let catalog = format!("[{}]", mods.join(","));
+        let two = format!(
+            r#"{{"downloads":[{{"url":"{url}/f/main.zip","name":"Main.zip","size":2500000}},
+               {{"url":"{url}/f/alt.zip","name":"Alt.zip","size":0}}]}}"#
+        );
+        let (g1, g2) = (png_of(1920, 1080), png_of(800, 600));
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                let resp = match req.url() {
+                    "/v2/mods" => tiny_http::Response::from_string(catalog.clone()),
+                    "/v2/mods/5/downloads" => tiny_http::Response::from_string(two.clone()),
+                    "/g1.png" => tiny_http::Response::from_data(g1.clone()),
+                    "/g2.png" => tiny_http::Response::from_data(g2.clone()),
+                    _ => tiny_http::Response::from_string("not found").with_status_code(404),
+                };
+                let _ = req.respond(resp);
+            }
+        });
+        url
+    }
+
+    /// Mod detail page: opened from a row, text from the catalog, gallery
+    /// with lazy images, failed image placeholder, NSFW blur following the
+    /// switch, install (with the file picker) sharing state with the list,
+    /// the link, and Back restoring the list as it was and freeing images.
+    fn detail_flow() {
+        use browse::test_hooks as hooks;
+        use i_slint_backend_testing::AccessibleRole;
+        use std::sync::{Arc, Mutex};
+        let api = detail_api();
+        let app = App::new().expect("app");
+        browse::attach(&app, &api);
+        app.show().expect("show");
+        let state = app.global::<BrowseState>();
+        let ready = |a: &App| a.global::<BrowseState>().get_load_state() == LoadState::Ready;
+        assert!(run_until(&app, Duration::from_secs(20), ready));
+        let row_named = |name: &str| {
+            ElementHandle::find_by_accessible_label(&app, name)
+                .find(|e| e.accessible_role() == Some(AccessibleRole::ListItem))
+                .unwrap_or_else(|| panic!("no row {name:?}"))
+        };
+
+        // List state before: sorted by name, scrolled down.
+        state.set_sort_index(4);
+        state.invoke_sort_selected(4);
+        let first = |a: &App| {
+            a.global::<BrowseState>()
+                .get_mods()
+                .row_data(0)
+                .map(|r| r.name.to_string())
+        };
+        assert_eq!(first(&app).as_deref(), Some("Filler 01"));
+        // Element searches can scroll the list, so the click position is
+        // worked out before scrolling: rows are 152 px, the fourth one sits
+        // at 456 px, 56 px into the list once it is scrolled by 400 px.
+        let list = ElementHandle::find_by_element_id(&app, "BrowsePage::mod-list")
+            .next()
+            .expect("mod list");
+        let top = list.absolute_position();
+        state.set_list_scroll(-400.0);
+        run_until(&app, Duration::from_millis(100), |_| false);
+        assert_eq!(state.get_list_scroll(), -400.0);
+        pointer_click_at(&app, top.x + 100.0, top.y + 56.0 + 76.0);
+        assert!(state.get_detail_open());
+        assert_eq!(hooks::detail_id().as_deref(), Some("f4"));
+        assert_eq!(state.get_detail().name.as_str(), "Filler 04");
+        assert_eq!(state.get_gallery_count(), 0);
+        assert_eq!(state.get_gallery_state(), ImageState::None);
+        assert_eq!(state.get_detail().description.as_str(), "");
+        assert!(!state.get_detail().has_link);
+        click(&app, "Back");
+        assert!(!state.get_detail_open());
+        assert_eq!(hooks::detail_id(), None);
+        assert_eq!(state.get_sort_index(), 4);
+        assert_eq!(state.get_list_scroll(), -400.0);
+        assert_eq!(first(&app).as_deref(), Some("Filler 01"));
+        assert_eq!(state.get_summary().as_str(), "32 mods");
+
+        // The gallery mod, opened with a real click on its row.
+        state.invoke_search_edited("gallery".into());
+        assert!(run_until(&app, Duration::from_secs(5), |a| {
+            a.global::<BrowseState>().get_mods().row_count() == 2
+        }));
+        pointer_click(&app, &row_named("Gallery Mod"));
+        assert!(state.get_detail_open());
+        let d = state.get_detail();
+        assert_eq!(d.name.as_str(), "Gallery Mod");
+        assert_eq!(d.author.as_str(), "Ada");
+        assert_eq!(d.kind.as_str(), "Skins \u{b7} Haze");
+        assert_eq!(d.tags.as_str(), "Sound, Funny");
+        assert_eq!((d.downloads.as_str(), d.likes.as_str()), ("1,234", "56"));
+        assert_eq!(
+            (d.added.as_str(), d.updated.as_str()),
+            ("2026-10-01", "2026-11-05")
+        );
+        assert_eq!(
+            d.description.as_str(),
+            "Hello & welcome.\n\n\u{2022} One\n\u{2022} Two\nlink"
+        );
+        assert!(d.has_link && !d.nsfw);
+
+        // Gallery: the first image loads lazily, fitted to the gallery box.
+        assert_eq!(state.get_gallery_count(), 3);
+        assert_eq!(state.get_gallery_index(), 0);
+        let image_ready =
+            |a: &App| a.global::<BrowseState>().get_gallery_state() == ImageState::Ready;
+        assert!(run_until(&app, Duration::from_secs(20), image_ready));
+        let size = |a: &App| {
+            let s = a.global::<BrowseState>().get_gallery_image().size();
+            (s.width, s.height)
+        };
+        assert_eq!(size(&app), browse::GALLERY_BOX);
+        // Strip thumbnails come from the list's thumbnail cache; the third
+        // image is missing and keeps its placeholder.
+        let strip = |a: &App| -> Vec<bool> {
+            a.global::<BrowseState>()
+                .get_gallery_thumbs()
+                .iter()
+                .map(|t| t.has_image)
+                .collect()
+        };
+        assert!(run_until(&app, Duration::from_secs(20), move |a| strip(a)
+            == [true, true, false]));
+        let thumb_size = |a: &App, i: usize| {
+            let s = a
+                .global::<BrowseState>()
+                .get_gallery_thumbs()
+                .row_data(i)
+                .expect("thumb")
+                .image
+                .size();
+            (s.width, s.height)
+        };
+        assert_eq!(thumb_size(&app, 0), (thumbs::DISPLAY_W, thumbs::DISPLAY_H));
+
+        click(&app, "Next");
+        assert_eq!(state.get_gallery_index(), 1);
+        assert!(run_until(&app, Duration::from_secs(20), image_ready));
+        assert_eq!(size(&app), (720, 540));
+        state.invoke_gallery_step(1);
+        assert_eq!(state.get_gallery_index(), 2);
+        assert!(run_until(&app, Duration::from_secs(20), |a| {
+            a.global::<BrowseState>().get_gallery_state() == ImageState::Failed
+        }));
+        assert_eq!(size(&app), (0, 0));
+        // Wraps around; images seen before come from the cache at once.
+        state.invoke_gallery_step(1);
+        assert_eq!(state.get_gallery_index(), 0);
+        assert_eq!(state.get_gallery_state(), ImageState::Ready);
+        click(&app, "Previous");
+        assert_eq!(state.get_gallery_index(), 2);
+        assert_eq!(state.get_gallery_state(), ImageState::Failed);
+        click(&app, "Image 2");
+        assert_eq!(state.get_gallery_index(), 1);
+        assert_eq!(state.get_gallery_state(), ImageState::Ready);
+        state.invoke_gallery_select(7);
+        assert_eq!(state.get_gallery_index(), 1);
+        let (bytes, count) = hooks::gallery_usage();
+        assert!(
+            count <= 4 && bytes <= 4 * 960 * 540 * 4,
+            "{bytes} bytes in {count}"
+        );
+
+        // Install from the detail page: the picker opens, and list and detail
+        // show the same state throughout.
+        let detail_state = |a: &App| {
+            a.global::<BrowseState>()
+                .get_detail_row()
+                .row_data(0)
+                .map(|r| r.state)
+        };
+        let list_state = |a: &App| {
+            a.global::<BrowseState>()
+                .get_mods()
+                .row_data(0)
+                .filter(|r| r.id == "m5")
+                .map(|r| r.state)
+        };
+        let status = ElementHandle::find_by_element_id(&app, "ModDetailPage::status")
+            .next()
+            .expect("detail install controls");
+        let in_status = |role: AccessibleRole, label: &str| {
+            status
+                .query_descendants()
+                .match_accessible_role(role)
+                .find_all()
+                .into_iter()
+                .find(|e| e.accessible_label().as_deref() == Some(label))
+        };
+        assert_eq!(detail_state(&app), Some(InstallState::Idle));
+        in_status(AccessibleRole::Button, "Install")
+            .expect("Install on the detail page")
+            .invoke_accessible_default_action();
+        assert_eq!(detail_state(&app), Some(InstallState::Downloading));
+        assert_eq!(list_state(&app), Some(InstallState::Downloading));
+        assert!(run_until(&app, Duration::from_secs(20), |a| a
+            .global::<BrowseState>()
+            .get_picker_open()));
+        assert_eq!(state.get_picker_title().as_str(), "Install Gallery Mod");
+        state.invoke_pick_download(0);
+        let job = hooks::job_generation("m5").expect("job started");
+        assert_eq!(hooks::job_url("m5"), Some(format!("{api}/f/main.zip")));
+        assert_eq!(hooks::in_flight("m5"), Some(job));
+        assert_eq!(detail_state(&app), Some(InstallState::Downloading));
+        assert_eq!(list_state(&app), Some(InstallState::Downloading));
+        assert!(in_status(AccessibleRole::Button, "Cancel").is_some());
+        // The download is a 404 (or the game is not found): the banner shows
+        // on the detail page and both go back to Install.
+        assert!(run_until(&app, Duration::from_secs(20), |a| {
+            a.global::<BrowseState>().get_banner_text() != "" && hooks::in_flight("m5").is_none()
+        }));
+        assert!(
+            state
+                .get_banner_text()
+                .starts_with("Could not install Gallery Mod.")
+        );
+        assert_eq!(detail_state(&app), Some(InstallState::Idle));
+        assert_eq!(list_state(&app), Some(InstallState::Idle));
+        click(&app, "Dismiss");
+        // An install seen on disk shows on both.
+        hooks::installed_read(&["m5"], false);
+        assert_eq!(detail_state(&app), Some(InstallState::Installed));
+        assert_eq!(list_state(&app), Some(InstallState::Installed));
+        assert!(in_status(AccessibleRole::Button, "Install").is_none());
+        hooks::installed_read(&[], false);
+        assert_eq!(detail_state(&app), Some(InstallState::Idle));
+
+        // Open on GameBanana goes through the opener (stubbed here).
+        let opened = Arc::new(Mutex::new(Vec::<String>::new()));
+        let log = opened.clone();
+        hooks::set_opener(move |url| {
+            log.lock().expect("log").push(url.to_owned());
+            Err("no browser here".into())
+        });
+        click(&app, "Open on GameBanana");
+        let seen = opened.clone();
+        assert!(run_until(&app, Duration::from_secs(10), |a| {
+            a.global::<BrowseState>().get_banner_text() != ""
+        }));
+        assert_eq!(
+            *seen.lock().expect("log"),
+            ["https://gamebanana.com/mods/5"]
+        );
+        assert_eq!(
+            state.get_banner_text().as_str(),
+            "Could not open the link. no browser here"
+        );
+        click(&app, "Dismiss");
+
+        // Back: the list is as it was, every decoded gallery image is gone,
+        // and a result arriving late is dropped.
+        click(&app, "Back");
+        assert!(!state.get_detail_open());
+        assert_eq!(hooks::gallery_usage(), (0, 0));
+        assert_eq!(state.get_gallery_thumbs().row_count(), 0);
+        assert_eq!(size(&app), (0, 0));
+        hooks::late_gallery_result(&format!("{api}/g1.png"));
+        assert_eq!(hooks::gallery_usage(), (0, 0));
+        assert_eq!(state.get_mods().row_count(), 2);
+        assert_eq!(state.get_sort_index(), 4);
+
+        // NSFW: everything image-based is blurred until Show NSFW is on, and
+        // the open page follows the switch both ways. A non-https link is
+        // not offered.
+        row_named("Spicy Gallery").invoke_accessible_default_action();
+        assert!(state.get_detail().nsfw);
+        assert!(!state.get_detail().has_link);
+        // Loading or blurred, never the full image while the switch is off.
+        let blurred = (browse::GALLERY_BOX.0 / 4, browse::GALLERY_BOX.1 / 4);
+        assert!(run_until(&app, Duration::from_secs(20), move |a| {
+            a.global::<BrowseState>().get_gallery_state() == ImageState::Ready
+        }));
+        assert_eq!(size(&app), blurred);
+        assert!(run_until(&app, Duration::from_secs(20), move |a| strip(a)
+            == [true, true]));
+        assert_eq!(
+            thumb_size(&app, 0),
+            (thumbs::OBSCURED_W, thumbs::OBSCURED_H)
+        );
+        assert_eq!(
+            thumb_size(&app, 1),
+            (thumbs::OBSCURED_W, thumbs::OBSCURED_H)
+        );
+        let switch = ElementHandle::find_by_element_id(&app, "ModDetailPage::nsfw-switch")
+            .next()
+            .expect("Show NSFW on the detail page");
+        switch.invoke_accessible_default_action();
+        assert!(state.get_show_nsfw());
+        assert_eq!(size(&app), browse::GALLERY_BOX);
+        assert_eq!(thumb_size(&app, 0), (thumbs::DISPLAY_W, thumbs::DISPLAY_H));
+        state.invoke_gallery_step(1);
+        assert!(run_until(&app, Duration::from_secs(20), image_ready));
+        assert_eq!(size(&app), (720, 540));
+        switch.invoke_accessible_default_action();
+        assert!(!state.get_show_nsfw());
+        assert_eq!(size(&app), (180, 135));
+        assert_eq!(
+            thumb_size(&app, 1),
+            (thumbs::OBSCURED_W, thumbs::OBSCURED_H)
+        );
+        click(&app, "Back");
+        assert_eq!(hooks::gallery_usage(), (0, 0));
     }
 
     /// NSFW mods are listed with a tag and a blurred thumbnail; Show NSFW

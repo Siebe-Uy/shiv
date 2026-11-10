@@ -8,6 +8,11 @@ license = "GPL-3.0"
 name = "shiv_ui"
 path = "src/main.rs"
 
+[features]
+# Developer probe for screenshots and memory measurements in release builds
+# (see `browse::dev_probe`). Never part of a normal build.
+dev-probe = []
+
 [dependencies]
 shiv-api = { path = "../shiv-api" }
 shiv-core = { path = "../shiv-core" }

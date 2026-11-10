@@ -21,7 +21,10 @@ use slint::{
 };
 
 use crate::thumbs;
-use crate::{App, BrowseState, DownloadRow, InstallState, LoadState, ModRow};
+use crate::{
+    App, BrowseState, DownloadRow, GalleryThumb, ImageState, InstallState, LoadState, ModDetail,
+    ModRow,
+};
 
 const SORTS: [(&str, SortKey); 5] = [
     ("Newest", SortKey::Newest),
@@ -40,6 +43,16 @@ const THUMB_QUEUE: usize = 48;
 const OBSCURED_KEEP: usize = 128;
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(150);
 const GAMEBANANA_SS: &str = "https://images.gamebanana.com/img/ss/mods/";
+/// Gallery images are decoded to fit this box (aspect kept).
+pub(crate) const GALLERY_BOX: (u32, u32) = (960, 540);
+/// Decoded gallery images kept while a detail page is open: the image shown
+/// and its two neighbours, plus one (about 2 MB each). Emptied on Back.
+const GALLERY_BUDGET: usize = 4 * (GALLERY_BOX.0 * GALLERY_BOX.1 * 4) as usize;
+const GALLERY_WORKERS: usize = 2;
+/// Pending gallery requests; stepping quickly drops the ones passed.
+const GALLERY_QUEUE: usize = 3;
+/// Most images shown in one gallery.
+const GALLERY_MAX: usize = 24;
 
 /// Serialises installs: two installs must not allocate pak numbers at once.
 static INSTALL_LOCK: Mutex<()> = Mutex::new(());
@@ -123,14 +136,94 @@ fn thumb_url(m: &ModDto) -> Option<String> {
         .filter(|s| !s.is_empty())
         .or_else(|| m.images.first().map(String::as_str))
         .filter(|s| !s.is_empty())?;
+    Some(small_variant(raw))
+}
+
+/// The 530 px variant of a GameBanana screenshot; other URLs unchanged.
+fn small_variant(raw: &str) -> String {
     if let Some(file) = raw.strip_prefix(GAMEBANANA_SS)
         && !file.is_empty()
         && !file.contains('/')
         && !file.contains("-90_")
     {
-        return Some(format!("{GAMEBANANA_SS}530-90_{file}"));
+        return format!("{GAMEBANANA_SS}530-90_{file}");
     }
-    Some(raw.to_owned())
+    raw.to_owned()
+}
+
+/// One gallery image: the full picture for the large view and the small
+/// variant for the strip (shared with the list's thumbnail cache).
+#[derive(Debug, Clone, PartialEq)]
+struct GalleryImage {
+    full: String,
+    small: String,
+}
+
+/// The gallery for a mod: its `images` (web URLs only, duplicates dropped, at
+/// most `GALLERY_MAX`), else its thumbnail.
+fn gallery_images(m: &ModDto) -> Vec<GalleryImage> {
+    let web = |u: &&String| u.starts_with("https://") || u.starts_with("http://");
+    let mut seen = HashSet::new();
+    let mut out: Vec<GalleryImage> = m
+        .images
+        .iter()
+        .filter(web)
+        .filter(|u| seen.insert(u.as_str()))
+        .take(GALLERY_MAX)
+        .map(|u| GalleryImage {
+            full: u.clone(),
+            small: small_variant(u),
+        })
+        .collect();
+    if out.is_empty()
+        && let Some(t) = m.thumbnail_url.as_ref().filter(|u| web(u))
+    {
+        out.push(GalleryImage {
+            full: t.clone(),
+            small: small_variant(t),
+        });
+    }
+    out
+}
+
+/// The detail page's text, from the catalog entry.
+fn detail_info(m: &ModDto) -> ModDetail {
+    fn non_empty(s: &Option<String>) -> Option<&str> {
+        s.as_deref().map(str::trim).filter(|s| !s.is_empty())
+    }
+    let kind: Vec<&str> = [non_empty(&m.category), non_empty(&m.hero)]
+        .into_iter()
+        .flatten()
+        .collect();
+    let tags: Vec<&str> = m
+        .tags
+        .iter()
+        .map(|t| t.trim())
+        .filter(|t| !t.is_empty())
+        .collect();
+    let date = |s: Option<&str>| s.and_then(short_date).unwrap_or_default().into();
+    ModDetail {
+        id: m.id.as_str().into(),
+        name: m.name.as_str().into(),
+        author: non_empty(&m.author).unwrap_or_default().into(),
+        kind: kind.join(" \u{b7} ").into(),
+        tags: tags.join(", ").into(),
+        downloads: fmt_count(m.download_count).into(),
+        likes: fmt_count(m.likes).into(),
+        added: date(m.remote_added_at.as_deref()),
+        updated: date(m.last_updated()),
+        description: m
+            .description
+            .as_deref()
+            .map(crate::describe::to_plain_text)
+            .unwrap_or_default()
+            .into(),
+        has_link: m
+            .remote_url
+            .as_deref()
+            .is_some_and(shiv_core::link::is_web_link),
+        nsfw: m.is_nsfw,
+    }
 }
 
 pub(crate) fn catalog_error_text(e: &ApiError) -> String {
@@ -191,23 +284,38 @@ struct ThumbQueue {
     known: HashSet<String>,
 }
 
+/// Called on the event loop when a request finished: the URL, and whether
+/// the image is now in the cache.
+type OnLoaded = fn(&Browse, &str, bool);
+
+/// A pool of workers fetching and decoding images into one cache, newest
+/// request first.
 #[derive(Clone)]
 struct ThumbLoader {
     shared: Arc<(Mutex<ThumbQueue>, Condvar)>,
+    queue: usize,
 }
 
 impl ThumbLoader {
-    fn start(cache: Arc<thumbs::Cache>, weak: Weak<App>) -> Self {
+    fn start(
+        cache: Arc<thumbs::Cache>,
+        weak: Weak<App>,
+        name: &str,
+        workers: usize,
+        queue: usize,
+        on_loaded: OnLoaded,
+    ) -> Self {
         let loader = ThumbLoader {
             shared: Arc::new((Mutex::new(ThumbQueue::default()), Condvar::new())),
+            queue,
         };
-        for n in 0..THUMB_WORKERS {
+        for n in 0..workers {
             let shared = loader.shared.clone();
             let cache = cache.clone();
             let weak = weak.clone();
             crate::spawn_worker(
-                &format!("shiv-thumb-{n}"),
-                move || thumb_worker(&shared, &cache, &weak),
+                &format!("{name}-{n}"),
+                move || thumb_worker(&shared, &cache, &weak, on_loaded),
                 // Fetch and decode panics are caught per image in the cache;
                 // anything else only costs this one worker.
                 |result| {
@@ -228,16 +336,31 @@ impl ThumbLoader {
         }
         q.known.insert(url.to_owned());
         q.pending.push_back(url.to_owned());
-        if q.pending.len() > THUMB_QUEUE
+        if q.pending.len() > self.queue
             && let Some(old) = q.pending.pop_front()
         {
             q.known.remove(&old);
         }
         cvar.notify_one();
     }
+
+    /// Forget requests not yet started (those in flight finish).
+    fn clear_pending(&self) {
+        let (lock, _) = &*self.shared;
+        let mut q = lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let ThumbQueue { pending, known } = &mut *q;
+        for url in pending.drain(..) {
+            known.remove(&url);
+        }
+    }
 }
 
-fn thumb_worker(shared: &(Mutex<ThumbQueue>, Condvar), cache: &thumbs::Cache, weak: &Weak<App>) {
+fn thumb_worker(
+    shared: &(Mutex<ThumbQueue>, Condvar),
+    cache: &thumbs::Cache,
+    weak: &Weak<App>,
+    on_loaded: OnLoaded,
+) {
     let (lock, cvar) = shared;
     loop {
         let url = {
@@ -254,14 +377,12 @@ fn thumb_worker(shared: &(Mutex<ThumbQueue>, Condvar), cache: &thumbs::Cache, we
             .unwrap_or_else(PoisonError::into_inner)
             .known
             .remove(&url);
-        // Failures are remembered by the cache; the row keeps its placeholder.
-        if ok {
-            let posted = weak.upgrade_in_event_loop(move |_| {
-                with_browse(|b| b.list.thumb_ready(&url));
-            });
-            if posted.is_err() {
-                return; // event loop is gone
-            }
+        // Failures are remembered by the cache.
+        let posted = weak.upgrade_in_event_loop(move |_| {
+            with_browse(|b| on_loaded(b, &url, ok));
+        });
+        if posted.is_err() {
+            return; // event loop is gone
         }
     }
 }
@@ -359,6 +480,10 @@ struct ModList {
     /// Blurred copies of NSFW thumbnails, by URL.
     obscured: RefCell<HashMap<String, slint::Image>>,
     notify: ModelNotify,
+    /// The mod whose detail page is open (it may be filtered out of the list).
+    detail: RefCell<Option<Entry>>,
+    /// Change notifications for [`DetailRow`].
+    detail_notify: ModelNotify,
 }
 
 impl ModList {
@@ -367,19 +492,26 @@ impl ModList {
         self.notify.reset();
     }
 
-    fn find(&self, id: &str) -> Option<(usize, Entry)> {
-        self.entries
-            .borrow()
-            .iter()
-            .enumerate()
-            .find(|(_, e)| e.id == id)
-            .map(|(i, e)| (i, e.clone()))
+    /// The list entry for `id`, else the open detail page's (installs keep
+    /// working for a mod a new search filtered out).
+    fn find(&self, id: &str) -> Option<Entry> {
+        let listed = self.entries.borrow().iter().find(|e| e.id == id).cloned();
+        listed.or_else(|| {
+            self.detail
+                .borrow()
+                .as_ref()
+                .filter(|e| e.id == id)
+                .cloned()
+        })
     }
 
     fn changed(&self, id: &str) {
         let idx = self.entries.borrow().iter().position(|e| e.id == id);
         if let Some(i) = idx {
             self.notify.row_changed(i);
+        }
+        if self.detail.borrow().as_ref().is_some_and(|e| e.id == id) {
+            self.detail_notify.row_changed(0);
         }
     }
 
@@ -434,16 +566,10 @@ impl ModList {
     }
 }
 
-impl Model for ModList {
-    type Data = ModRow;
-
-    fn row_count(&self) -> usize {
-        self.entries.borrow().len()
-    }
-
-    fn row_data(&self, row: usize) -> Option<ModRow> {
-        let entries = self.entries.borrow();
-        let e = entries.get(row)?;
+impl ModList {
+    /// A row as shown, with its install state. `with_thumb` also resolves
+    /// (or requests) the thumbnail.
+    fn row_for(&self, e: &Entry, with_thumb: bool) -> ModRow {
         let mut out = ModRow {
             id: e.id.as_str().into(),
             name: e.name.as_str().into(),
@@ -453,7 +579,7 @@ impl Model for ModList {
             nsfw: e.nsfw,
             ..ModRow::default()
         };
-        if let Some(url) = &e.thumb_url {
+        if with_thumb && let Some(url) = &e.thumb_url {
             match self.cache.get(url) {
                 Some(img) => {
                     if let Some(thumb) = self.display_thumb(url, &img, e.nsfw) {
@@ -469,7 +595,7 @@ impl Model for ModList {
             out.state = InstallState::Downloading;
             out.progress = -1.0;
             out.progress_text = "Checking files".into();
-            return Some(out);
+            return out;
         }
         out.state = match self.jobs.borrow().get(&e.id) {
             Some(job) => match &job.phase {
@@ -485,11 +611,46 @@ impl Model for ModList {
             None if !e.downloadable => InstallState::Unavailable,
             None => InstallState::Idle,
         };
-        Some(out)
+        out
+    }
+}
+
+impl Model for ModList {
+    type Data = ModRow;
+
+    fn row_count(&self) -> usize {
+        self.entries.borrow().len()
+    }
+
+    fn row_data(&self, row: usize) -> Option<ModRow> {
+        let entries = self.entries.borrow();
+        Some(self.row_for(entries.get(row)?, true))
     }
 
     fn model_tracker(&self) -> &dyn ModelTracker {
         &self.notify
+    }
+}
+
+/// The open detail page's mod as one row, computed by the same code and
+/// from the same install state as the list, so both always agree.
+struct DetailRow(Rc<ModList>);
+
+impl Model for DetailRow {
+    type Data = ModRow;
+
+    fn row_count(&self) -> usize {
+        usize::from(self.0.detail.borrow().is_some())
+    }
+
+    fn row_data(&self, row: usize) -> Option<ModRow> {
+        let detail = self.0.detail.borrow();
+        let e = detail.as_ref().filter(|_| row == 0)?;
+        Some(self.0.row_for(e, false))
+    }
+
+    fn model_tracker(&self) -> &dyn ModelTracker {
+        &self.0.detail_notify
     }
 }
 
@@ -611,6 +772,27 @@ pub struct Browse {
     picker: RefCell<Option<(String, Vec<DownloadFile>)>>,
     search_timer: Timer,
     this: RefCell<RcWeak<Browse>>,
+    /// The open detail page's gallery and link.
+    detail: RefCell<Option<Detail>>,
+    gallery_cache: Arc<thumbs::Cache>,
+    gallery: ThumbLoader,
+    /// Opens a web link (blocking, on a worker); replaced in tests.
+    opener: RefCell<Opener>,
+}
+
+type Opener = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
+
+/// State of the open detail page beyond its text (which lives in Slint).
+struct Detail {
+    nsfw: bool,
+    images: Vec<GalleryImage>,
+    index: usize,
+    /// The mod's page, when it is an https link.
+    link: Option<String>,
+    /// Strip thumbnails, one per image.
+    thumbs: Rc<VecModel<GalleryThumb>>,
+    /// Blurred large images (NSFW with Show NSFW off), by URL.
+    obscured: HashMap<String, slint::Image>,
 }
 
 /// Wire the Browse screen to `app` and start loading the catalog.
@@ -624,14 +806,32 @@ pub fn attach(app: &App, api_url: &str) -> Arc<thumbs::Cache> {
         in_flight: RefCell::new(HashMap::new()),
         installed: RefCell::new(HashSet::new()),
         installed_since: RefCell::new(HashSet::new()),
-        loader: ThumbLoader::start(cache.clone(), weak.clone()),
+        loader: ThumbLoader::start(
+            cache.clone(),
+            weak.clone(),
+            "shiv-thumb",
+            THUMB_WORKERS,
+            THUMB_QUEUE,
+            |b, url, ok| {
+                if ok {
+                    b.list.thumb_ready(url);
+                    b.strip_ready(url);
+                }
+            },
+        ),
         cache: cache.clone(),
         show_nsfw: Cell::new(false),
         obscured: RefCell::new(HashMap::new()),
         notify: ModelNotify::default(),
+        detail: RefCell::new(None),
+        detail_notify: ModelNotify::default(),
     });
+    let gallery_cache = Arc::new(thumbs::Cache::fetching(
+        GALLERY_BUDGET,
+        thumbs::Shape::Fit(GALLERY_BOX.0, GALLERY_BOX.1),
+    ));
     let browse = Rc::new(Browse {
-        weak,
+        weak: weak.clone(),
         client: Arc::new(Client::new(api_url)),
         list: list.clone(),
         catalog: RefCell::new(Rc::new(Vec::new())),
@@ -646,6 +846,19 @@ pub fn attach(app: &App, api_url: &str) -> Arc<thumbs::Cache> {
         picker: RefCell::new(None),
         search_timer: Timer::default(),
         this: RefCell::new(RcWeak::new()),
+        detail: RefCell::new(None),
+        gallery: ThumbLoader::start(
+            gallery_cache.clone(),
+            weak.clone(),
+            "shiv-gallery",
+            GALLERY_WORKERS,
+            GALLERY_QUEUE,
+            |b, url, ok| b.gallery_loaded(url, ok),
+        ),
+        gallery_cache,
+        opener: RefCell::new(Arc::new(|url: &str| {
+            shiv_core::link::open_web_link(url).map_err(|e| e.to_string())
+        })),
     });
     *browse.this.borrow_mut() = Rc::downgrade(&browse);
     BROWSE.with(|cell| *cell.borrow_mut() = Some(browse.clone()));
@@ -656,7 +869,8 @@ pub fn attach(app: &App, api_url: &str) -> Arc<thumbs::Cache> {
     state.set_categories(ModelRc::new(VecModel::from(vec![SharedString::from(
         ALL_CATEGORIES,
     )])));
-    state.set_mods(ModelRc::from(list));
+    state.set_mods(ModelRc::from(list.clone()));
+    state.set_detail_row(ModelRc::new(DetailRow(list)));
 
     let handle = |f: fn(&Rc<Browse>)| move || with_browse(f);
     state.on_search_edited(|text| with_browse(|b| b.search_edited(text.as_str())));
@@ -676,8 +890,20 @@ pub fn attach(app: &App, api_url: &str) -> Arc<thumbs::Cache> {
             let show = !b.list.show_nsfw.get();
             b.list.set_show_nsfw(show);
             b.with_state(|s| s.set_show_nsfw(show));
+            b.detail_images_changed();
         });
     });
+    state.on_open_detail(|id| with_browse(|b| b.open_detail(id.as_str())));
+    state.on_close_detail(handle(|b| b.close_detail()));
+    state.on_gallery_select(|i| {
+        with_browse(|b| {
+            if let Ok(i) = usize::try_from(i) {
+                b.show_image(i);
+            }
+        });
+    });
+    state.on_gallery_step(|delta| with_browse(|b| b.gallery_step(delta)));
+    state.on_open_link(handle(|b| b.open_link()));
 
     browse.load();
     cache
@@ -761,6 +987,9 @@ impl Browse {
         for i in changed {
             self.list.notify.row_changed(i);
         }
+        if self.list.detail.borrow().is_some() {
+            self.list.detail_notify.row_changed(0);
+        }
     }
 
     fn fail_load(&self, text: String) {
@@ -810,6 +1039,8 @@ impl Browse {
             s.set_load_state(LoadState::Ready);
         });
         self.refresh();
+        #[cfg(any(debug_assertions, feature = "dev-probe"))]
+        dev_probe::catalog_loaded();
     }
 
     /// Re-run the query over the catalog and replace the list.
@@ -829,7 +1060,11 @@ impl Browse {
                 fmt_count(total as u64)
             )
         };
-        self.with_state(|s| s.set_summary(summary.into()));
+        // New results start at the top.
+        self.with_state(|s| {
+            s.set_summary(summary.into());
+            s.set_list_scroll(0.0);
+        });
     }
 
     fn search_edited(&self, text: &str) {
@@ -875,7 +1110,7 @@ impl Browse {
         if self.busy(id) || self.picker.borrow().is_some() {
             return;
         }
-        let Some((_, entry)) = self.list.find(id) else {
+        let Some(entry) = self.list.find(id) else {
             return;
         };
         let generation = self.next_job.get() + 1;
@@ -921,10 +1156,7 @@ impl Browse {
             resolving.remove(id);
         }
         self.list.changed(id);
-        let name = self
-            .list
-            .find(id)
-            .map_or_else(|| id.to_owned(), |(_, e)| e.name);
+        let name = self.list.find(id).map_or_else(|| id.to_owned(), |e| e.name);
         let mut files = match result {
             Ok(files) => files,
             Err(text) => return self.set_banner(&format!("Could not install {name}. {text}")),
@@ -974,7 +1206,7 @@ impl Browse {
         if self.busy(id) {
             return;
         }
-        let Some((_, entry)) = self.list.find(id) else {
+        let Some(entry) = self.list.find(id) else {
             return;
         };
         let generation = self.next_job.get() + 1;
@@ -1091,15 +1323,302 @@ impl Browse {
             Update::Done(result) => {
                 self.list.jobs.borrow_mut().remove(id);
                 if let Err(Failure::Message(text)) = result {
-                    let name = self
-                        .list
-                        .find(id)
-                        .map_or_else(|| id.to_owned(), |(_, e)| e.name);
+                    let name = self.list.find(id).map_or_else(|| id.to_owned(), |e| e.name);
                     self.set_banner(&format!("Could not install {name}. {text}"));
                 }
             }
         }
         self.list.changed(id);
+    }
+
+    // -----------------------------------------------------------------------
+    // Detail page
+
+    /// Open the detail page for `id` (from the loaded catalog; no network
+    /// needed for the text). The list stays as it is underneath.
+    fn open_detail(&self, id: &str) {
+        let catalog = self.catalog.borrow().clone();
+        let Some(m) = catalog.iter().find(|m| m.id == id) else {
+            return;
+        };
+        self.drop_gallery();
+        let entry = self
+            .list
+            .find(id)
+            .unwrap_or_else(|| Entry::from_dto(m.clone()));
+        *self.list.detail.borrow_mut() = Some(entry);
+        self.list.detail_notify.reset();
+        let images = gallery_images(m);
+        let thumbs = Rc::new(VecModel::from(vec![GalleryThumb::default(); images.len()]));
+        let count = images.len() as i32;
+        *self.detail.borrow_mut() = Some(Detail {
+            nsfw: m.is_nsfw,
+            images,
+            index: 0,
+            link: m
+                .remote_url
+                .clone()
+                .filter(|u| shiv_core::link::is_web_link(u)),
+            thumbs: thumbs.clone(),
+            obscured: HashMap::new(),
+        });
+        let info = detail_info(m);
+        self.with_state(|s| {
+            s.set_detail(info);
+            s.set_gallery_count(count);
+            s.set_gallery_thumbs(ModelRc::from(thumbs));
+            s.set_detail_open(true);
+        });
+        self.refresh_strip();
+        self.show_image(0);
+    }
+
+    /// Back to the list: the page and every image it decoded are dropped.
+    fn close_detail(&self) {
+        self.with_state(|s| s.set_detail_open(false));
+        self.drop_gallery();
+        crate::release_freed_memory();
+    }
+
+    fn drop_gallery(&self) {
+        let open = self.detail.borrow_mut().take().is_some();
+        *self.list.detail.borrow_mut() = None;
+        self.list.detail_notify.reset();
+        self.gallery.clear_pending();
+        self.gallery_cache.clear();
+        if open {
+            self.with_state(|s| {
+                s.set_gallery_image(slint::Image::default());
+                s.set_gallery_state(ImageState::None);
+                s.set_gallery_thumbs(ModelRc::default());
+                s.set_gallery_count(0);
+                s.set_gallery_index(0);
+                s.set_detail(ModDetail::default());
+            });
+        }
+    }
+
+    /// A large image as shown: blurred for an NSFW mod unless Show NSFW is
+    /// on. `None` when the blurred copy could not be made (never the original).
+    fn display_large(&self, url: &str, img: &thumbs::Image) -> Option<slint::Image> {
+        let mut detail = self.detail.borrow_mut();
+        let d = detail.as_mut()?;
+        if !d.nsfw || self.list.show_nsfw.get() {
+            return Some(to_slint(img));
+        }
+        if let Some(done) = d.obscured.get(url) {
+            return Some(done.clone());
+        }
+        let blurred = to_slint(&thumbs::obscured_any(img)?);
+        d.obscured.insert(url.to_owned(), blurred.clone());
+        Some(blurred)
+    }
+
+    /// Show gallery image `index`: from the cache, else load it (and its
+    /// neighbours) on the gallery workers.
+    fn show_image(&self, index: usize) {
+        let (url, neighbours) = {
+            let mut detail = self.detail.borrow_mut();
+            let Some(d) = detail.as_mut() else { return };
+            let n = d.images.len();
+            if index >= n {
+                return;
+            }
+            d.index = index;
+            let near = [(index + 1) % n, (index + n - 1) % n]
+                .into_iter()
+                .filter(|i| *i != index)
+                .map(|i| d.images[i].full.clone())
+                .collect::<Vec<_>>();
+            (d.images[index].full.clone(), near)
+        };
+        let shown = self
+            .gallery_cache
+            .get(&url)
+            .map(|img| self.display_large(&url, &img));
+        let (image, state) = match shown {
+            Some(Some(image)) => (image, ImageState::Ready),
+            Some(None) => (slint::Image::default(), ImageState::Failed),
+            None if self.gallery_cache.has_failed(&url) => {
+                (slint::Image::default(), ImageState::Failed)
+            }
+            None => (slint::Image::default(), ImageState::Loading),
+        };
+        // Newest request first: the neighbours, then the image itself.
+        self.gallery.clear_pending();
+        for near in neighbours.iter().chain([&url]) {
+            if self.gallery_cache.get(near).is_none() && !self.gallery_cache.has_failed(near) {
+                self.gallery.request(near);
+            }
+        }
+        self.with_state(|s| {
+            s.set_gallery_index(index as i32);
+            s.set_gallery_image(image);
+            s.set_gallery_state(state);
+        });
+    }
+
+    fn gallery_step(&self, delta: i32) {
+        let next = {
+            let detail = self.detail.borrow();
+            let Some(d) = detail.as_ref().filter(|d| !d.images.is_empty()) else {
+                return;
+            };
+            let n = d.images.len() as i64;
+            (d.index as i64 + i64::from(delta)).rem_euclid(n) as usize
+        };
+        self.show_image(next);
+    }
+
+    /// A gallery worker finished `url`. Results for a closed page or another
+    /// mod are dropped from the cache at once.
+    fn gallery_loaded(&self, url: &str, ok: bool) {
+        let current = {
+            let detail = self.detail.borrow();
+            let Some(d) = detail.as_ref() else {
+                self.gallery_cache.remove(url);
+                return;
+            };
+            if !d.images.iter().any(|g| g.full == url) {
+                self.gallery_cache.remove(url);
+                return;
+            }
+            d.images.get(d.index).is_some_and(|g| g.full == url)
+        };
+        if current {
+            let index = self.detail.borrow().as_ref().map_or(0, |d| d.index);
+            if ok {
+                self.show_image(index);
+            } else {
+                self.with_state(|s| s.set_gallery_state(ImageState::Failed));
+            }
+        }
+    }
+
+    /// Fill the thumbnail strip from the list's thumbnail cache (blurred
+    /// like the list for NSFW mods), requesting what is missing.
+    fn refresh_strip(&self) {
+        let detail = self.detail.borrow();
+        let Some(d) = detail.as_ref() else { return };
+        for (i, g) in d.images.iter().enumerate() {
+            let shown = match self.list.cache.get(&g.small) {
+                Some(img) => self.list.display_thumb(&g.small, &img, d.nsfw),
+                None => {
+                    if !self.list.cache.has_failed(&g.small) {
+                        self.list.loader.request(&g.small);
+                    }
+                    None
+                }
+            };
+            let row = match shown {
+                Some(image) => GalleryThumb {
+                    image,
+                    has_image: true,
+                },
+                None => GalleryThumb::default(),
+            };
+            d.thumbs.set_row_data(i, row);
+        }
+    }
+
+    fn strip_ready(&self, url: &str) {
+        let wanted = self
+            .detail
+            .borrow()
+            .as_ref()
+            .is_some_and(|d| d.images.iter().any(|g| g.small == url));
+        if wanted {
+            self.refresh_strip();
+        }
+    }
+
+    /// Show NSFW changed: re-render the open page's images.
+    fn detail_images_changed(&self) {
+        let index = {
+            let mut detail = self.detail.borrow_mut();
+            let Some(d) = detail.as_mut() else { return };
+            d.obscured.clear();
+            d.index
+        };
+        self.refresh_strip();
+        self.show_image(index);
+    }
+
+    fn open_link(&self) {
+        let Some(url) = self.detail.borrow().as_ref().and_then(|d| d.link.clone()) else {
+            return;
+        };
+        let opener = self.opener.borrow().clone();
+        let weak = self.weak.clone();
+        let started = crate::spawn_worker(
+            "shiv-open-link",
+            move || opener(&url),
+            move |result| {
+                if let Err(text) = result.and_then(|r| r) {
+                    let _ = weak.upgrade_in_event_loop(move |_| {
+                        with_browse(|b| b.set_banner(&format!("Could not open the link. {text}")));
+                    });
+                }
+            },
+        );
+        if !started {
+            self.set_banner("Could not open the link. Could not start a background thread.");
+        }
+    }
+}
+
+/// Developer probe, for screenshots and memory measurements without pointer
+/// automation. Debug builds, or release builds made with `--features
+/// dev-probe`; a normal release ignores these variables. Once the catalog has
+/// loaded: `SHIV_OPEN_MOD=<id>` opens that mod's detail page (after
+/// `SHIV_OPEN_AFTER_SECS`, default 0), `SHIV_GALLERY_STEPS=<n>` then shows the
+/// next image n times (one per second), and `SHIV_CLOSE_DETAIL_SECS=<s>` goes
+/// Back s seconds after opening.
+#[cfg(any(debug_assertions, feature = "dev-probe"))]
+mod dev_probe {
+    use super::*;
+
+    thread_local! {
+        static DONE: Cell<bool> = const { Cell::new(false) };
+        static TIMERS: RefCell<Vec<Timer>> = const { RefCell::new(Vec::new()) };
+    }
+
+    fn after(secs: u64, f: impl FnOnce(&Browse) + 'static) {
+        let timer = Timer::default();
+        let mut f = Some(f);
+        timer.start(
+            TimerMode::SingleShot,
+            Duration::from_secs(secs),
+            move || {
+                if let Some(f) = f.take() {
+                    with_browse(|b| f(b));
+                }
+            },
+        );
+        TIMERS.with(|t| t.borrow_mut().push(timer));
+    }
+
+    pub(super) fn catalog_loaded() {
+        if DONE.with(|d| d.replace(true)) {
+            return;
+        }
+        let Some(id) = std::env::var("SHIV_OPEN_MOD")
+            .ok()
+            .filter(|v| !v.is_empty())
+        else {
+            return;
+        };
+        let num = |name: &str| std::env::var(name).ok().and_then(|v| v.parse::<u64>().ok());
+        let open = num("SHIV_OPEN_AFTER_SECS").unwrap_or(0);
+        let steps = num("SHIV_GALLERY_STEPS").unwrap_or(0);
+        let close = num("SHIV_CLOSE_DETAIL_SECS");
+        after(open, move |b| b.open_detail(&id));
+        for n in 1..=steps {
+            after(open + n, |b| b.gallery_step(1));
+        }
+        if let Some(secs) = close {
+            after(open + secs, |b| b.close_detail());
+        }
     }
 }
 
@@ -1174,6 +1693,34 @@ pub(crate) mod test_hooks {
             b.installed_generation.set(generation);
             let delivered = if stale { generation - 1 } else { generation };
             b.installed_read(delivered, ids.iter().map(|s| (*s).to_owned()).collect());
+        });
+    }
+
+    /// Decoded gallery bytes and images held.
+    pub fn gallery_usage() -> (usize, usize) {
+        let mut out = (0, 0);
+        with_browse(|b| out = b.gallery_cache.usage());
+        out
+    }
+
+    /// The mod whose detail page is open.
+    pub fn detail_id() -> Option<String> {
+        let mut out = None;
+        with_browse(|b| out = b.list.detail.borrow().as_ref().map(|e| e.id.clone()));
+        out
+    }
+
+    /// Replace the link opener (tests must never start a browser).
+    pub fn set_opener(f: impl Fn(&str) -> Result<(), String> + Send + Sync + 'static) {
+        with_browse(|b| *b.opener.borrow_mut() = Arc::new(f));
+    }
+
+    /// A gallery worker delivering `url` late (after the page closed or
+    /// moved on): fetched into the cache, then reported.
+    pub fn late_gallery_result(url: &str) {
+        with_browse(|b| {
+            let ok = b.gallery_cache.get_or_fetch(url).is_some();
+            b.gallery_loaded(url, ok);
         });
     }
 
@@ -1255,6 +1802,77 @@ mod tests {
             "1,200 downloads \u{b7} 3 likes"
         );
         assert_eq!(SORTS[1], ("Last updated", SortKey::Updated));
+    }
+
+    #[test]
+    fn gallery_lists_web_images_once_and_falls_back_to_the_thumbnail() {
+        let gb = "https://images.gamebanana.com/img/ss/mods/6a0f.jpg";
+        let m = ModDto {
+            images: vec![
+                gb.into(),
+                "".into(),
+                "file:///etc/passwd".into(),
+                gb.into(),
+                "http://x.test/b.png".into(),
+            ],
+            thumbnail_url: Some("https://x.test/t.png".into()),
+            ..ModDto::default()
+        };
+        let g = gallery_images(&m);
+        assert_eq!(
+            g,
+            [
+                GalleryImage {
+                    full: gb.into(),
+                    small: "https://images.gamebanana.com/img/ss/mods/530-90_6a0f.jpg".into(),
+                },
+                GalleryImage {
+                    full: "http://x.test/b.png".into(),
+                    small: "http://x.test/b.png".into(),
+                },
+            ]
+        );
+        let only_thumb = ModDto {
+            thumbnail_url: Some("https://x.test/t.png".into()),
+            ..ModDto::default()
+        };
+        assert_eq!(gallery_images(&only_thumb).len(), 1);
+        assert!(gallery_images(&ModDto::default()).is_empty());
+        let many = ModDto {
+            images: (0..100)
+                .map(|i| format!("https://x.test/{i}.png"))
+                .collect(),
+            ..ModDto::default()
+        };
+        assert_eq!(gallery_images(&many).len(), GALLERY_MAX);
+    }
+
+    #[test]
+    fn detail_text_comes_from_the_catalog_entry() {
+        let m = ModDto {
+            id: "m1".into(),
+            name: "Mod".into(),
+            author: Some(" ".into()),
+            category: Some("Skins".into()),
+            hero: Some("Haze".into()),
+            tags: vec!["a".into(), "".into(), "b".into()],
+            likes: 1500,
+            remote_added_at: Some("2026-01-02T00:00:00Z".into()),
+            files_updated_at: Some("2026-03-04T00:00:00Z".into()),
+            description: Some("<p>Hi&nbsp;there</p>".into()),
+            remote_url: Some("http://gamebanana.com/mods/1".into()),
+            ..ModDto::default()
+        };
+        let d = detail_info(&m);
+        assert_eq!(d.author.as_str(), "");
+        assert_eq!(d.kind.as_str(), "Skins \u{b7} Haze");
+        assert_eq!(d.tags.as_str(), "a, b");
+        assert_eq!(d.likes.as_str(), "1,500");
+        assert_eq!(d.added.as_str(), "2026-01-02");
+        assert_eq!(d.updated.as_str(), "2026-03-04");
+        assert_eq!(d.description.as_str(), "Hi there");
+        // Only https links are offered.
+        assert!(!d.has_link);
     }
 
     #[test]

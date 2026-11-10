@@ -1,0 +1,185 @@
+// Browse state shared by the list (browse.slint) and the mod detail page
+// (mod-detail.slint), and the install controls both show.
+
+import { Theme } from "theme.slint";
+import { Button, TextButton, ProgressBar } from "widgets.slint";
+
+export enum LoadState { loading, ready, failed }
+
+// `cancelling`: Cancel was pressed and the worker has not finished yet; Install
+// stays disabled until it has, so two workers never install the same mod.
+export enum InstallState { idle, downloading, installing, cancelling, installed, unavailable }
+
+export struct ModRow {
+    id: string,
+    name: string,
+    byline: string,
+    stats: string,
+    // "Updated 2026-11-08", or "" when unknown.
+    updated: string,
+    thumb: image,
+    has-thumb: bool,
+    // Marked NSFW; `thumb` is a blurred copy unless Show NSFW is on.
+    nsfw: bool,
+    state: InstallState,
+    // 0..1, negative when the size is unknown.
+    progress: float,
+    progress-text: string,
+}
+
+// One file in the download picker.
+export struct DownloadRow {
+    name: string,
+    // "2.5 MB", or "Size unknown".
+    size: string,
+}
+
+// The text of the open mod detail page (from the loaded catalog).
+export struct ModDetail {
+    id: string,
+    name: string,
+    author: string,
+    // "Skins · Haze": category and hero, either may be missing.
+    kind: string,
+    // Comma-separated, "" for none.
+    tags: string,
+    downloads: string,
+    likes: string,
+    // "2026-11-08", "" when unknown.
+    added: string,
+    updated: string,
+    // Plain text (markup already removed), "" when there is none.
+    description: string,
+    has-link: bool,
+    nsfw: bool,
+}
+
+export enum ImageState { none, loading, ready, failed }
+
+// One image in the gallery's thumbnail strip.
+export struct GalleryThumb {
+    image: image,
+    has-image: bool,
+}
+
+// Everything the Rust side reads or drives.
+export global BrowseState {
+    in property <[ModRow]> mods;
+    in property <LoadState> load-state: LoadState.loading;
+    in property <string> error-text;
+    in property <string> banner-text;
+    in property <string> summary;
+    in property <[string]> sorts: ["Newest"];
+    in property <[string]> categories: ["All categories"];
+    in-out property <int> sort-index: 0;
+    in-out property <int> category-index: 0;
+    // The list's scroll offset, kept while the detail page is open.
+    in-out property <length> list-scroll;
+    // NSFW thumbnails shown unblurred; off at every start.
+    in property <bool> show-nsfw: false;
+    // Download picker, shown when a mod offers more than one file.
+    in property <bool> picker-open: false;
+    in property <string> picker-title;
+    in property <[DownloadRow]> picker-files;
+
+    // Mod detail page, shown over the list (which keeps its state).
+    in property <bool> detail-open: false;
+    in property <ModDetail> detail;
+    // The detail mod's install state: one row, from the same source as the list.
+    in property <[ModRow]> detail-row;
+    // Gallery: the large image (blurred for NSFW unless Show NSFW is on).
+    in property <image> gallery-image;
+    in property <ImageState> gallery-state: ImageState.none;
+    in property <int> gallery-index;
+    in property <int> gallery-count;
+    in property <[GalleryThumb]> gallery-thumbs;
+
+    callback search-edited(string);
+    callback sort-selected(int);
+    callback category-selected(int);
+    callback retry();
+    callback install(string);
+    callback cancel(string);
+    callback dismiss-banner();
+    callback toggle-nsfw();
+    callback pick-download(int);
+    callback cancel-pick();
+    // The screen was shown: re-read which mods are installed.
+    callback shown();
+    callback open-detail(string);
+    callback close-detail();
+    // Show gallery image `index`, or step by `delta` (wraps around).
+    callback gallery-select(int);
+    callback gallery-step(int);
+    // Open the mod's GameBanana page in the browser.
+    callback open-link();
+}
+
+// Install / progress / state for one mod, as in the list row.
+export component InstallControls inherits VerticalLayout {
+    in property <ModRow> item;
+    in property <bool> primary: false;
+    alignment: center;
+    spacing: Theme.s1;
+
+    if root.item.state == InstallState.idle: Button {
+        text: "Install";
+        primary: root.primary;
+        clicked => { BrowseState.install(root.item.id); }
+    }
+    if root.item.state == InstallState.downloading: ProgressBar {
+        progress: root.item.progress;
+    }
+    if root.item.state == InstallState.downloading: HorizontalLayout {
+        Text {
+            text: root.item.progress-text;
+            color: Theme.text-muted;
+            font-size: Theme.text-sm;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        TextButton {
+            text: "Cancel";
+            clicked => { BrowseState.cancel(root.item.id); }
+        }
+    }
+    if root.item.state == InstallState.installing: Text {
+        text: "Installing";
+        color: Theme.text-muted;
+        font-size: Theme.text-md;
+        horizontal-alignment: right;
+    }
+    if root.item.state == InstallState.cancelling: Text {
+        text: "Cancelling";
+        color: Theme.text-muted;
+        font-size: Theme.text-md;
+        horizontal-alignment: right;
+    }
+    if root.item.state == InstallState.installed: Text {
+        text: "Installed";
+        color: Theme.text-muted;
+        font-size: Theme.text-md;
+        horizontal-alignment: right;
+    }
+    if root.item.state == InstallState.unavailable: Text {
+        text: "No download";
+        color: Theme.text-faint;
+        font-size: Theme.text-md;
+        horizontal-alignment: right;
+    }
+}
+
+// The small outlined NSFW tag beside a mod name.
+export component NsfwTag inherits Rectangle {
+    width: tag.preferred-width + Theme.s1;
+    height: tag.preferred-height + 4px;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: Theme.danger;
+    tag := Text {
+        text: "NSFW";
+        color: Theme.danger;
+        font-size: Theme.text-sm;
+        font-weight: 600;
+    }
+}
