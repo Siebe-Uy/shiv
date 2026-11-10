@@ -22,6 +22,13 @@ const LINE_BREAK: [&str; 11] = [
 ];
 /// Elements that stand as their own paragraph.
 const PARAGRAPH: [&str; 9] = ["p", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "hr"];
+/// Longest BBCode `=` value looked for (`[url=...]`, `[color=...]`). Values
+/// beyond this (very long URLs) are dropped up to their `]` or first space.
+const BB_VALUE_MAX: usize = 256;
+/// Bytes searched for a BBCode tag's `]`: `[`, `/`, a name, `=`, the value, `]`.
+const BB_WINDOW: usize = 1 + 1 + 8 + 1 + BB_VALUE_MAX + 1;
+/// Bytes searched for an entity's `;` (`&thinsp;`, `&#x10FFFF;`).
+const ENTITY_WINDOW: usize = 12;
 /// BBCode tags that are recognised (others, like `[WIP]`, stay as text).
 const BBCODE: [&str; 17] = [
     "b", "i", "u", "s", "url", "img", "list", "*", "quote", "size", "color", "center", "left",
@@ -110,7 +117,7 @@ impl Out {
             ' ' | '\t' | '\n' | '\r' | '\u{a0}' | '\u{2007}' | '\u{202f}' => {
                 self.pending_space = true;
             }
-            c if c.is_control() => {}
+            c if c.is_control() || is_format_char(c) => {}
             c => self.push(c),
         }
     }
@@ -214,35 +221,95 @@ fn html_tag(raw: &str, lower: &str, i: usize, out: &mut Out) -> Option<usize> {
     Some(end)
 }
 
+/// Unicode format characters (category Cf): bidi overrides and isolates,
+/// zero-width characters, soft hyphen, BOM and tag characters. Invisible,
+/// but able to reorder or hide the text around them.
+fn is_format_char(c: char) -> bool {
+    matches!(c,
+        '\u{ad}'
+        | '\u{600}'..='\u{605}'
+        | '\u{61c}'
+        | '\u{6dd}'
+        | '\u{70f}'
+        | '\u{180e}'
+        | '\u{200b}'..='\u{200f}'
+        | '\u{202a}'..='\u{202e}'
+        | '\u{2060}'..='\u{2064}'
+        | '\u{2066}'..='\u{206f}'
+        | '\u{feff}'
+        | '\u{fff9}'..='\u{fffb}'
+        | '\u{110bd}'
+        | '\u{1d173}'..='\u{1d17a}'
+        | '\u{e0001}'
+        | '\u{e0020}'..='\u{e007f}')
+}
+
 /// Length of a tag up to and including its `>`, skipping `>` inside quoted
-/// attribute values. `None` when the tag never closes.
+/// attribute values. A quote only opens a value right after `=` (spaces
+/// allowed), so an apostrophe in `<a title=it's>` or in text after a stray
+/// `<b` does not swallow what follows. `None` when the tag never closes.
 fn tag_end(tag: &str) -> Option<usize> {
     let mut quote = None;
+    let mut after_eq = false;
     for (at, c) in tag.char_indices() {
         match (quote, c) {
-            (None, '"' | '\'') => quote = Some(c),
+            (None, '"' | '\'') if after_eq => quote = Some(c),
             (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
             (None, '>') => return Some(at + 1),
-            _ => {}
+            (None, '=') => after_eq = true,
+            (None, c) if c.is_whitespace() => {}
+            (None, _) => after_eq = false,
         }
     }
     None
 }
 
 /// Handle a known BBCode tag at `i` (a `[`). `[img]...[/img]` drops its URL.
+/// Every search is bounded or consumes what it scanned, so the whole
+/// conversion stays linear however many `[` the text has.
 fn bbcode_tag(raw: &str, lower: &str, i: usize, out: &mut Out) -> Option<usize> {
     let rest = &lower[i..];
-    let close = rest.get(..64).unwrap_or(rest).find(']')?;
-    let inner = &rest[1..close];
-    let (closing, inner) = match inner.strip_prefix('/') {
-        Some(s) => (true, s),
-        None => (false, inner),
+    let b = rest.as_bytes();
+    let window = &b[..b.len().min(BB_WINDOW)];
+    let (name, closing, end) = match window.iter().position(|c| *c == b']') {
+        Some(close) => {
+            // `]` is ASCII, so `close` is a character boundary.
+            let inner = &rest[1..close];
+            let (closing, inner) = match inner.strip_prefix('/') {
+                Some(s) => (true, s),
+                None => (false, inner),
+            };
+            let name = inner.split('=').next().unwrap_or(inner);
+            if !BBCODE.contains(&name) || (closing && inner.contains('=')) {
+                return None;
+            }
+            (name, closing, i + close + 1)
+        }
+        None => {
+            // No `]` close by: a known `[name=` with an overlong value (a long
+            // URL) is dropped up to its `]`, or up to the first whitespace when
+            // it never closes. A short value is not a tag.
+            let name_len = b[1..]
+                .iter()
+                .take_while(|c| c.is_ascii_alphabetic())
+                .count();
+            let name = &rest[1..1 + name_len];
+            if !BBCODE.contains(&name) || b.get(1 + name_len) != Some(&b'=') {
+                return None;
+            }
+            let value = &b[2 + name_len..];
+            let stop = value
+                .iter()
+                .position(|c| *c == b']' || c.is_ascii_whitespace())
+                .unwrap_or(value.len());
+            if stop <= BB_VALUE_MAX {
+                return None;
+            }
+            let closed = usize::from(value.get(stop) == Some(&b']'));
+            (name, false, i + 2 + name_len + stop + closed)
+        }
     };
-    let name = inner.split('=').next().unwrap_or(inner);
-    if !BBCODE.contains(&name) || (closing && inner.contains('=')) {
-        return None;
-    }
-    let end = i + close + 1;
     match name {
         "img" if !closing => {
             return Some(
@@ -262,7 +329,11 @@ fn bbcode_tag(raw: &str, lower: &str, i: usize, out: &mut Out) -> Option<usize> 
 /// `(None, len)` for one that decodes to nothing usable, `None` for text that
 /// is not an entity (a lone `&`).
 fn entity(s: &str) -> Option<(Option<char>, usize)> {
-    let semi = s.get(..12).unwrap_or(s).find(';')?;
+    let b = s.as_bytes();
+    // A byte search: `;` is ASCII, so the index is a character boundary.
+    let semi = b[..b.len().min(ENTITY_WINDOW)]
+        .iter()
+        .position(|c| *c == b';')?;
     let body = &s[1..semi];
     let len = semi + 1;
     if let Some(num) = body.strip_prefix('#') {
@@ -394,6 +465,91 @@ mod tests {
         // Multi-byte characters are cut on a character boundary.
         let wide = "\u{e9}".repeat(MAX_CHARS + 10);
         assert_eq!(to_plain_text(&wide).chars().count(), MAX_CHARS + 1);
+    }
+
+    #[test]
+    fn multibyte_text_near_brackets_and_ampersands() {
+        // The search windows end inside a multi-byte character.
+        let e = "\u{e9}".repeat(40);
+        assert_eq!(to_plain_text(&format!("a &{e};")), format!("a &{e};"));
+        assert_eq!(to_plain_text(&format!("a [{e}]")), format!("a [{e}]"));
+        assert_eq!(
+            to_plain_text("&amp;\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}"),
+            "&\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}"
+        );
+        let pad = "x".repeat(super::BB_WINDOW - 4);
+        assert_eq!(
+            to_plain_text(&format!("[b{pad}\u{e9}\u{e9}]z")),
+            format!("[b{pad}\u{e9}\u{e9}]z")
+        );
+    }
+
+    #[test]
+    fn long_bbcode_values() {
+        let url = format!("https://x.test/{}", "a".repeat(150));
+        assert_eq!(
+            to_plain_text(&format!("[url={url}]site[/url] end")),
+            "site end"
+        );
+        // Longer than the window: dropped up to its `]`.
+        let long = format!("https://x.test/{}", "b".repeat(1000));
+        assert_eq!(
+            to_plain_text(&format!("go [url={long}]site[/url] now")),
+            "go site now"
+        );
+        // Never closed: dropped up to the first space, the rest stays.
+        assert_eq!(to_plain_text(&format!("go [url={long} now")), "go now");
+        // A short unclosed value and unknown names are plain text.
+        assert_eq!(to_plain_text("[size=3 big"), "[size=3 big");
+        assert_eq!(
+            to_plain_text(&format!("[note={long}]")),
+            format!("[note={long}]")
+        );
+    }
+
+    #[test]
+    fn apostrophes_do_not_swallow_text() {
+        assert_eq!(to_plain_text("<a title=it's>Link</a> after"), "Link after");
+        assert_eq!(
+            to_plain_text("I <3 it's <b>fine</b>, isn't it"),
+            "I <3 it's fine, isn't it"
+        );
+        assert_eq!(to_plain_text("<a href = 'x>y'>ok</a>"), "ok");
+    }
+
+    #[test]
+    fn format_characters_are_removed() {
+        let raw =
+            "safe\u{202e}txt.exe\u{202c} a\u{200b}b \u{2066}x\u{2069} &#x202E;y \u{feff}z\u{ad}";
+        assert_eq!(to_plain_text(raw), "safetxt.exe ab x y z");
+    }
+
+    /// Many `[` and `&` with multi-byte text around them stay linear. The
+    /// first inputs were quadratic before (seconds); the last one is all
+    /// markup that is consumed silently, so every byte is processed, and
+    /// gets a looser bound for unoptimised test builds under load.
+    #[test]
+    fn large_inputs_stay_fast() {
+        let ms = std::time::Duration::from_millis;
+        let inputs = [
+            // Five-byte units, so the old fixed windows ended mid-character.
+            ("&\u{e9}\u{e9}".repeat(400_000), ms(200)),
+            ("[\u{e9}\u{e9}".repeat(400_000), ms(200)),
+            ("[url=\u{e9}".repeat(300_000), ms(200)),
+            (
+                format!("[url=https://x.test/{}]", "c".repeat(300)).repeat(6_000),
+                ms(200),
+            ),
+            ("&#0;[b][/b]<i></i>".repeat(110_000), ms(1000)),
+        ];
+        for (raw, limit) in &inputs {
+            assert!(raw.len() >= 1_900_000, "{}", raw.len());
+            let start = std::time::Instant::now();
+            let text = to_plain_text(raw);
+            let took = start.elapsed();
+            assert!(text.chars().count() <= MAX_CHARS + 1);
+            assert!(took < *limit, "{took:?} for {:?}...", &raw[..20]);
+        }
     }
 
     #[test]
