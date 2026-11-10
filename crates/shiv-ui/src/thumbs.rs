@@ -17,6 +17,8 @@ pub const DISPLAY_H: u32 = 135;
 
 /// Largest encoded image accepted from the network.
 const MAX_DOWNLOAD: u64 = 10 * 1024 * 1024;
+/// Redirects followed per image (by hand, see [`http_get`]).
+const MAX_REDIRECTS: usize = 3;
 /// Remembered failed URLs before the list is reset (keeps it bounded).
 const MAX_FAILED: usize = 4096;
 /// Decode limits per image. With several workers decoding at once these bound
@@ -125,8 +127,10 @@ impl Cache {
 
     /// Fetching over HTTP, decoding to `shape`.
     pub fn fetching(max_bytes: usize, shape: Shape) -> Self {
+        // Redirects are followed in `http_get`, which refuses https -> http.
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(20)))
+            .max_redirects(0)
             .build()
             .into();
         Self::with_fetcher(max_bytes, move |url| http_get(&agent, url)).shaped(shape)
@@ -227,13 +231,76 @@ impl Cache {
     }
 }
 
+/// GET with at most [`MAX_REDIRECTS`] redirects, never from https to http.
 fn http_get(agent: &ureq::Agent, url: &str) -> Option<Vec<u8>> {
-    let mut resp = agent.get(url).call().ok()?;
-    resp.body_mut()
-        .with_config()
-        .limit(MAX_DOWNLOAD)
-        .read_to_vec()
-        .ok()
+    let mut url = url.to_owned();
+    for _ in 0..=MAX_REDIRECTS {
+        let mut resp = agent.get(&url).call().ok()?;
+        if resp.status().is_redirection() {
+            let location = resp.headers().get("location")?.to_str().ok()?;
+            url = redirect_target(&url, location)?;
+            continue;
+        }
+        if !resp.status().is_success() {
+            return None;
+        }
+        return resp
+            .body_mut()
+            .with_config()
+            .limit(MAX_DOWNLOAD)
+            .read_to_vec()
+            .ok();
+    }
+    None
+}
+
+/// Where a redirect from `current` to `location` leads: absolute, scheme-
+/// relative, root-relative or relative. `None` for other schemes and for a
+/// downgrade from https to http.
+fn redirect_target(current: &str, location: &str) -> Option<String> {
+    let location = location.trim();
+    let scheme_of = |u: &str| {
+        let lower = u.get(..8).unwrap_or(u).to_ascii_lowercase();
+        if lower.starts_with("https://") {
+            Some("https")
+        } else if lower.starts_with("http://") {
+            Some("http")
+        } else {
+            None
+        }
+    };
+    let from = scheme_of(current)?;
+    let target = if scheme_of(location).is_some() {
+        location.to_owned()
+    } else if let Some(rest) = location.strip_prefix("//") {
+        format!("{from}://{rest}")
+    } else {
+        let after = from.len() + 3;
+        let authority_end = current[after..]
+            .find(['/', '?', '#'])
+            .map_or(current.len(), |i| after + i);
+        let origin = &current[..authority_end];
+        if location.starts_with('/') {
+            format!("{origin}{location}")
+        } else if location
+            .split(['/', '?', '#'])
+            .next()
+            .unwrap_or("")
+            .contains(':')
+        {
+            return None; // another scheme (file:, ftp:, data:)
+        } else {
+            let path_end = current[authority_end..]
+                .find(['?', '#'])
+                .map_or(current.len(), |i| authority_end + i);
+            let path = &current[authority_end..path_end];
+            let dir = &path[..path.rfind('/').map_or(0, |i| i + 1)];
+            let dir = if dir.is_empty() { "/" } else { dir };
+            format!("{origin}{dir}{location}")
+        }
+    };
+    let to = scheme_of(&target)?;
+    (from == "http" || to == "https").then_some(target)
 }
 
 /// Grid the pixels are averaged down to for [`obscured`]: 16x9 cells of 15 px
@@ -500,6 +567,83 @@ mod tests {
                 .unwrap();
             assert!(max_diff <= 4, "{w}x{h}: detail leaked ({max_diff})");
         }
+    }
+
+    #[test]
+    fn redirect_targets() {
+        let t = redirect_target;
+        assert_eq!(
+            t("https://a.test/x/y.png", "https://b.test/z.png").as_deref(),
+            Some("https://b.test/z.png")
+        );
+        assert_eq!(
+            t("http://a.test/y.png", "https://b.test/z.png").as_deref(),
+            Some("https://b.test/z.png")
+        );
+        assert_eq!(
+            t("http://a.test/y.png", "http://b.test/z.png").as_deref(),
+            Some("http://b.test/z.png")
+        );
+        assert_eq!(
+            t("https://a.test/x/y.png?q=1", "//c.test/z.png").as_deref(),
+            Some("https://c.test/z.png")
+        );
+        assert_eq!(
+            t("https://a.test/x/y.png?q=/1", "/z.png").as_deref(),
+            Some("https://a.test/z.png")
+        );
+        assert_eq!(
+            t("https://a.test/x/y.png?q=/1", "z.png").as_deref(),
+            Some("https://a.test/x/z.png")
+        );
+        assert_eq!(
+            t("https://a.test", "z.png").as_deref(),
+            Some("https://a.test/z.png")
+        );
+        // Downgrades and other schemes are refused.
+        assert_eq!(t("https://a.test/y.png", "http://a.test/y.png"), None);
+        assert_eq!(t("https://a.test/y.png", "HTTP://a.test/y.png"), None);
+        assert_eq!(t("http://a.test/y.png", "file:///etc/passwd"), None);
+        assert_eq!(t("http://a.test/y.png", "data:image/png;base64,AA"), None);
+        assert_eq!(t("http://a.test/y.png", "ftp://a.test/y.png"), None);
+    }
+
+    /// Real HTTP: up to three redirects are followed (relative and
+    /// absolute), a fourth is refused.
+    #[test]
+    fn fetch_follows_at_most_three_redirects() {
+        let server = tiny_http::Server::http("127.0.0.1:0").expect("server");
+        let base = format!("http://{}", server.server_addr().to_ip().expect("ip"));
+        let img = png(32, 18, [5, 6, 7]);
+        let abs = base.clone();
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                let url = req.url().to_owned();
+                let redirect = |to: String| {
+                    tiny_http::Response::from_string("")
+                        .with_status_code(302)
+                        .with_header(
+                            tiny_http::Header::from_bytes("Location", to.as_bytes())
+                                .expect("header"),
+                        )
+                };
+                let resp = match url.as_str() {
+                    "/img.png" => tiny_http::Response::from_data(img.clone()),
+                    // r3 -> r2 -> r1 -> img: three redirects.
+                    "/r1" => redirect("img.png".into()),
+                    "/r2" => redirect(format!("{abs}/r1")),
+                    "/r3" => redirect("/r2".into()),
+                    "/r4" => redirect("/r3".into()),
+                    _ => tiny_http::Response::from_string("no").with_status_code(404),
+                };
+                let _ = req.respond(resp);
+            }
+        });
+        let cache = Cache::fetching(10 * THUMB_BYTES, Shape::Fill(DISPLAY_W, DISPLAY_H));
+        assert!(cache.get_or_fetch(&format!("{base}/img.png")).is_some());
+        assert!(cache.get_or_fetch(&format!("{base}/r3")).is_some());
+        assert!(cache.get_or_fetch(&format!("{base}/r4")).is_none());
+        assert!(cache.get_or_fetch(&format!("{base}/missing")).is_none());
     }
 
     #[test]
