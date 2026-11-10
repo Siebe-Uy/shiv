@@ -503,10 +503,13 @@ mod tests {
             launch::Deps {
                 locate: Arc::new(move || Ok(located.clone())),
                 check: Arc::new(shiv_core::health::check),
-                launch: Arc::new(move |_| {
+                launch: Arc::new(move |_, _| {
                     counter.fetch_add(1, Ordering::SeqCst);
                     Ok(())
                 }),
+                running: Arc::new(|| false),
+                poll: Duration::from_millis(10),
+                timeout: Duration::from_secs(5),
             },
         );
         let located = paths.clone();
@@ -1019,11 +1022,16 @@ mod tests {
         no_steam.store(false, Ordering::Relaxed);
     }
 
-    /// Launch against a temp install with a fake launcher (Steam is never
-    /// started): the startup check fills the sidebar quietly; Launch shows the
-    /// dialog; Cancel launches nothing; Launch anyway after Review re-checks
-    /// and shows changed findings instead of launching; screen changes refresh
-    /// the count; a clean install launches at once; an opener failure shows.
+    /// Launch against a temp install with a fake launcher and a fake game
+    /// process (Steam is never started): the startup check fills the sidebar
+    /// quietly; Launch shows the dialog; Cancel launches nothing; Launch
+    /// anyway after Review re-checks and shows changed findings instead of
+    /// launching; screen changes refresh the count; a clean install launches
+    /// at once; an opener failure shows. After a launch the status says
+    /// Launching until the game process appears, then Running until it exits;
+    /// Cancel launch stops waiting (and stops a still-running opener); no game
+    /// process before the timeout says the launch could not be confirmed; a
+    /// game started elsewhere is followed instead of launched again.
     fn launch_flow() {
         use shiv_core::game::GamePaths;
         use shiv_core::launch::LaunchError;
@@ -1044,15 +1052,29 @@ mod tests {
 
         let launches = Arc::new(AtomicUsize::new(0));
         let fail = Arc::new(AtomicBool::new(false));
-        let (counter, failing) = (launches.clone(), fail.clone());
+        // The fake game process; a launch starts it while `starts` is set.
+        let game = Arc::new(AtomicBool::new(false));
+        let starts = Arc::new(AtomicBool::new(true));
+        // While set, the launcher blocks like an opener that has not returned.
+        let hold = Arc::new(AtomicBool::new(false));
+        let opener_stopped = Arc::new(AtomicBool::new(false));
+        let (counter, failing, game_in, starts_in, hold_in, stopped) = (
+            launches.clone(),
+            fail.clone(),
+            game.clone(),
+            starts.clone(),
+            hold.clone(),
+            opener_stopped.clone(),
+        );
         let located = paths.clone();
+        let game_seen = game.clone();
         let app = App::new().expect("app");
         launch::attach_with(
             &app,
             launch::Deps {
                 locate: Arc::new(move || Ok(located.clone())),
                 check: Arc::new(shiv_core::health::check),
-                launch: Arc::new(move |_| {
+                launch: Arc::new(move |_, cancel| {
                     if failing.load(Ordering::SeqCst) {
                         return Err(LaunchError::OpenerFailed {
                             program: "xdg-open".into(),
@@ -1060,8 +1082,21 @@ mod tests {
                         });
                     }
                     counter.fetch_add(1, Ordering::SeqCst);
+                    while hold_in.load(Ordering::SeqCst) {
+                        if cancel.load(Ordering::SeqCst) {
+                            stopped.store(true, Ordering::SeqCst);
+                            return Err(LaunchError::Cancelled);
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    if starts_in.load(Ordering::SeqCst) {
+                        game_in.store(true, Ordering::SeqCst);
+                    }
                     Ok(())
                 }),
+                running: Arc::new(move || game_seen.load(Ordering::SeqCst)),
+                poll: Duration::from_millis(10),
+                timeout: Duration::from_millis(1500),
             },
         );
         app.show().expect("show");
@@ -1072,11 +1107,26 @@ mod tests {
                 !s.get_busy() && s.get_findings().row_count() == n
             }
         };
+        // Launched `n` times and the game is up.
         let launched = |n: usize| {
             let l = launches.clone();
-            move |a: &App| !a.global::<LaunchState>().get_busy() && l.load(Ordering::SeqCst) == n
+            move |a: &App| {
+                let s = a.global::<LaunchState>();
+                !s.get_busy() && s.get_running() && l.load(Ordering::SeqCst) == n
+            }
         };
         let dialog = |a: &App| a.global::<LaunchState>().get_dialog_open();
+        let close_game = |app: &App| {
+            game.store(false, Ordering::SeqCst);
+            assert!(run_until(app, Duration::from_secs(20), |a| {
+                let s = a.global::<LaunchState>();
+                !s.get_running() && !s.get_busy()
+            }));
+            assert_eq!(
+                app.global::<LaunchState>().get_status_text().as_str(),
+                launch::EXITED_TEXT
+            );
+        };
 
         // Startup check: quiet (no busy state), sidebar count, no dialog, no launch.
         assert!(!state.get_busy());
@@ -1105,16 +1155,24 @@ mod tests {
         assert!(run_until(&app, Duration::from_secs(20), move |a| dialog(a)
             && a.global::<LaunchState>().get_findings().row_count() == 2));
         assert_eq!(launches.load(Ordering::SeqCst), 0);
-        // These findings are fresh: Launch anyway launches directly.
+        // These findings are fresh: Launch anyway launches directly. The
+        // status follows the game process: Running, then closed.
         click(&app, "Launch anyway");
         assert!(run_until(&app, Duration::from_secs(20), launched(1)));
-        assert!(state.get_status_text().contains("starting"));
+        assert_eq!(state.get_status_text().as_str(), launch::RUNNING_TEXT);
+        assert!(!state.get_waiting());
+        // Launch is refused while the game runs.
+        state.invoke_launch();
+        run_until(&app, Duration::from_millis(200), |_| false);
+        assert_eq!(launches.load(Ordering::SeqCst), 1);
+        close_game(&app);
 
         // Review with unchanged findings: the re-check matches, so it launches.
         click(&app, "Review");
         click(&app, "Launch anyway");
         assert!(run_until(&app, Duration::from_secs(20), launched(2)));
         assert!(!state.get_dialog_open());
+        close_game(&app);
 
         // Fixing the files elsewhere: a screen change refreshes the count.
         std::fs::remove_file(&bad).expect("remove");
@@ -1126,6 +1184,69 @@ mod tests {
         click(&app, "Launch");
         assert!(run_until(&app, Duration::from_secs(20), launched(3)));
         assert!(!state.get_dialog_open());
+        close_game(&app);
+
+        // Steam takes the link but the game does not appear: Launching (with
+        // Cancel launch) until Cancel; nothing is followed afterwards.
+        starts.store(false, Ordering::SeqCst);
+        click(&app, "Launch");
+        assert!(run_until(&app, Duration::from_secs(20), |a| a
+            .global::<LaunchState>()
+            .get_waiting()));
+        assert!(state.get_busy());
+        assert_eq!(state.get_busy_text().as_str(), launch::LAUNCHING_TEXT);
+        click(&app, "Cancel launch");
+        assert!(!state.get_waiting() && !state.get_busy() && !state.get_running());
+        assert_eq!(state.get_status_text().as_str(), launch::CANCELLED_TEXT);
+        assert!(!state.get_status_error());
+        game.store(true, Ordering::SeqCst);
+        run_until(&app, Duration::from_millis(300), |_| false);
+        assert!(!state.get_running(), "a cancelled launch is not followed");
+        game.store(false, Ordering::SeqCst);
+
+        // ...or until the timeout: the status says it could not confirm.
+        click(&app, "Launch");
+        assert!(run_until(&app, Duration::from_secs(20), |a| {
+            let s = a.global::<LaunchState>();
+            !s.get_busy() && s.get_status_error()
+        }));
+        assert!(!state.get_waiting() && !state.get_running());
+        assert!(
+            state.get_status_text().contains("Could not confirm"),
+            "{}",
+            state.get_status_text()
+        );
+        assert_eq!(launches.load(Ordering::SeqCst), 5);
+
+        // Cancel while the opener itself has not returned: it is stopped.
+        hold.store(true, Ordering::SeqCst);
+        click(&app, "Launch");
+        assert!(run_until(&app, Duration::from_secs(20), |a| a
+            .global::<LaunchState>()
+            .get_waiting()));
+        click(&app, "Cancel launch");
+        assert!(!state.get_busy());
+        let stopped = opener_stopped.clone();
+        assert!(run_until(&app, Duration::from_secs(20), move |_| stopped
+            .load(Ordering::SeqCst)));
+        assert_eq!(state.get_status_text().as_str(), launch::CANCELLED_TEXT);
+        hold.store(false, Ordering::SeqCst);
+        starts.store(true, Ordering::SeqCst);
+
+        // Started outside Shiv: Launch follows it instead of launching again,
+        // and the state returns to ready when it exits.
+        game.store(true, Ordering::SeqCst);
+        click(&app, "Launch");
+        assert!(run_until(&app, Duration::from_secs(20), |a| {
+            let s = a.global::<LaunchState>();
+            !s.get_busy() && s.get_running()
+        }));
+        assert_eq!(
+            state.get_status_text().as_str(),
+            launch::ALREADY_RUNNING_TEXT
+        );
+        assert_eq!(launches.load(Ordering::SeqCst), 6);
+        close_game(&app);
 
         // The opener refusing the link is shown as an error.
         fail.store(true, Ordering::SeqCst);
@@ -1141,7 +1262,8 @@ mod tests {
             "{}",
             state.get_status_text()
         );
-        assert_eq!(launches.load(Ordering::SeqCst), 3);
+        assert!(!state.get_running() && !state.get_waiting());
+        assert_eq!(launches.load(Ordering::SeqCst), 6);
     }
 
     /// Installed screen against a temp addons dir (never the real one):

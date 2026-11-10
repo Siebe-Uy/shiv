@@ -5,11 +5,20 @@
 //! Threading matches `installed`: locating the game, the check and the launch
 //! run on worker threads that post back with `upgrade_in_event_loop`. A
 //! generation counter drops results that a newer request has superseded.
+//!
+//! After Steam accepts the launch link, a watcher polls for the game process:
+//! the status says "Launching" until it appears, then "Running" until it
+//! exits, or that the launch could not be confirmed after [`Deps::timeout`].
+//! Cancel launch stops waiting and terminates the URI opener if it still
+//! runs; Steam owns the game process, so a launch it accepted cannot be
+//! taken back, and the status says so.
 
 use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use shiv_core::game::GamePaths;
 use shiv_core::health::{self, Finding, FindingKind};
@@ -19,10 +28,13 @@ use slint::{ComponentHandle, Model as _, ModelRc, VecModel, Weak};
 
 use crate::browse::game_error_text;
 use crate::installed::Locate;
-use crate::{App, FindingRow, LaunchState};
+use crate::{App, CrosshairState, FindingRow, InstalledState, LaunchState, PerfState};
 
 pub(crate) type Check = Arc<dyn Fn(&GamePaths) -> Vec<Finding> + Send + Sync>;
-pub(crate) type Launcher = Arc<dyn Fn(&GamePaths) -> Result<(), LaunchError> + Send + Sync>;
+/// Opens the launch link; returns early with `Cancelled` once the flag is set.
+pub(crate) type Launcher =
+    Arc<dyn Fn(&GamePaths, &AtomicBool) -> Result<(), LaunchError> + Send + Sync>;
+pub(crate) type Running = Arc<dyn Fn() -> bool + Send + Sync>;
 
 /// Injectable so tests never touch the real install or start Steam.
 #[derive(Clone)]
@@ -30,6 +42,12 @@ pub(crate) struct Deps {
     pub locate: Locate,
     pub check: Check,
     pub launch: Launcher,
+    /// Whether a Deadlock process exists.
+    pub running: Running,
+    /// How often the watcher looks for the game process.
+    pub poll: Duration,
+    /// How long after Launch the game process must appear.
+    pub timeout: Duration,
 }
 
 impl Deps {
@@ -37,8 +55,80 @@ impl Deps {
         Deps {
             locate: Arc::new(crate::locate_game),
             check: Arc::new(health::check),
-            launch: Arc::new(launch::launch),
+            launch: Arc::new(launch::launch_cancellable),
+            running: Arc::new(shiv_core::game::is_running),
+            poll: Duration::from_secs(1),
+            // Steam may update the game or process shaders before it starts.
+            timeout: Duration::from_secs(180),
         }
+    }
+}
+
+pub(crate) const LAUNCHING_TEXT: &str = "Launching Deadlock\u{2026}";
+pub(crate) const RUNNING_TEXT: &str = "Deadlock is running.";
+pub(crate) const ALREADY_RUNNING_TEXT: &str = "Deadlock is already running.";
+pub(crate) const EXITED_TEXT: &str = "Deadlock closed.";
+pub(crate) const CANCELLED_TEXT: &str = "Stopped waiting for Deadlock. If Steam already received the launch request it can still start the game; Shiv cannot take that back, so close the game if it opens.";
+
+fn timed_out_text(timeout: Duration) -> String {
+    let secs = timeout.as_secs();
+    let span = if secs >= 120 && secs.is_multiple_of(60) {
+        format!("{} minutes", secs / 60)
+    } else {
+        format!("{secs} seconds")
+    };
+    format!(
+        "Could not confirm that Deadlock started: no game process after {span}. Check Steam for an update or error."
+    )
+}
+
+/// How a launch watch ended.
+enum WatchEnd {
+    Failed(String),
+    TimedOut,
+    Exited,
+    Cancelled,
+}
+
+/// Worker body: open the link (when `launch` is given), wait up to `timeout`
+/// for the game process, report it with `on_running`, then wait for it to exit.
+fn watch_game(
+    deps: &Deps,
+    launch: Option<&GamePaths>,
+    cancel: &AtomicBool,
+    on_running: impl FnOnce(),
+) -> WatchEnd {
+    let cancelled = || cancel.load(Ordering::Relaxed);
+    if let Some(paths) = launch {
+        let start = Instant::now();
+        match (deps.launch)(paths, cancel) {
+            Err(LaunchError::Cancelled) => return WatchEnd::Cancelled,
+            Err(e) => return WatchEnd::Failed(format!("Could not launch Deadlock: {e}.")),
+            Ok(()) => {}
+        }
+        loop {
+            if cancelled() {
+                return WatchEnd::Cancelled;
+            }
+            if (deps.running)() {
+                break;
+            }
+            if start.elapsed() >= deps.timeout {
+                return WatchEnd::TimedOut;
+            }
+            std::thread::sleep(deps.poll);
+        }
+        on_running();
+    }
+    loop {
+        if cancelled() {
+            return WatchEnd::Cancelled;
+        }
+        if !(deps.running)() {
+            return WatchEnd::Exited;
+        }
+        // While the game runs there is no hurry; poll less often.
+        std::thread::sleep(deps.poll * 2);
     }
 }
 
@@ -133,6 +223,8 @@ struct Launch {
     /// not a launch result.
     status_from_check: Cell<bool>,
     generation: Cell<u64>,
+    /// Stop flag of the running launch/game watch, if any.
+    watch: RefCell<Option<Arc<AtomicBool>>>,
 }
 
 /// Wire Launch to `app` and run the startup check.
@@ -150,12 +242,14 @@ pub(crate) fn attach_with(app: &App, deps: Deps) {
         fresh_dialog: Cell::new(false),
         status_from_check: Cell::new(false),
         generation: Cell::new(0),
+        watch: RefCell::new(None),
     });
     LAUNCH.with(|c| *c.borrow_mut() = Some(controller));
     let state = app.global::<LaunchState>();
     state.set_findings(ModelRc::from(rows));
     state.on_launch(|| with_launch(|l| l.launch_clicked()));
     state.on_launch_anyway(|| with_launch(|l| l.launch_anyway()));
+    state.on_cancel_launch(|| with_launch(|l| l.cancel_launch()));
     state.on_cancel(|| with_launch(|l| l.with_state(|s| s.set_dialog_open(false))));
     state.on_review(|| {
         with_launch(|l| {
@@ -209,16 +303,146 @@ impl Launch {
         g
     }
 
-    /// A Launch (check or launch) is in progress.
+    /// A Launch (check or launch) is in progress, or the game runs.
     fn busy(&self) -> bool {
-        self.weak
-            .upgrade()
-            .is_none_or(|a| a.global::<LaunchState>().get_busy())
+        self.weak.upgrade().is_none_or(|a| {
+            let s = a.global::<LaunchState>();
+            s.get_busy() || s.get_running()
+        })
     }
 
     fn launch_clicked(&self) {
         if !self.busy() {
             self.check(Purpose::Launch);
+        }
+    }
+
+    /// Start watching: launch first when `launch` is given, otherwise the game
+    /// already runs and only its exit is awaited.
+    fn start_watch(&self, launch: Option<GamePaths>) {
+        self.stop_watch();
+        let generation = self.next_generation();
+        let cancel = Arc::new(AtomicBool::new(false));
+        *self.watch.borrow_mut() = Some(cancel.clone());
+        let launching = launch.is_some();
+        self.with_state(|s| {
+            if launching {
+                s.set_busy(true);
+                s.set_waiting(true);
+                s.set_busy_text(LAUNCHING_TEXT.into());
+            } else {
+                s.set_busy(false);
+                s.set_running(true);
+            }
+            s.set_status_text("".into());
+            s.set_status_error(false);
+        });
+        let deps = self.deps.clone();
+        let weak = self.weak.clone();
+        let post_running = weak.clone();
+        let started = crate::spawn_worker(
+            "shiv-launch",
+            move || {
+                watch_game(&deps, launch.as_ref(), &cancel, move || {
+                    let _ = post_running.upgrade_in_event_loop(move |_| {
+                        with_launch(|l| l.game_started(generation));
+                    });
+                })
+            },
+            move |result| {
+                let end = result.unwrap_or_else(WatchEnd::Failed);
+                let _ = weak.upgrade_in_event_loop(move |_| {
+                    with_launch(|l| l.watch_ended(generation, end));
+                });
+            },
+        );
+        if !started {
+            self.watch.borrow_mut().take();
+            self.with_state(|s| {
+                s.set_waiting(false);
+                s.set_running(false);
+            });
+            self.finish(Err("Could not start a background thread.".into()));
+        }
+    }
+
+    fn stop_watch(&self) {
+        if let Some(cancel) = self.watch.borrow_mut().take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn game_started(&self, generation: u64) {
+        if generation != self.generation.get() {
+            return;
+        }
+        self.with_state(|s| {
+            s.set_busy(false);
+            s.set_waiting(false);
+            s.set_running(true);
+            s.set_status_text(RUNNING_TEXT.into());
+            s.set_status_error(false);
+        });
+        self.refresh_visible_screen();
+    }
+
+    fn watch_ended(&self, generation: u64, end: WatchEnd) {
+        if generation != self.generation.get() {
+            return;
+        }
+        self.watch.borrow_mut().take();
+        let was_running = self
+            .weak
+            .upgrade()
+            .is_some_and(|a| a.global::<LaunchState>().get_running());
+        self.with_state(|s| {
+            s.set_waiting(false);
+            s.set_running(false);
+        });
+        match end {
+            WatchEnd::Failed(text) => self.finish(Err(text)),
+            WatchEnd::TimedOut => self.finish(Err(timed_out_text(self.deps.timeout))),
+            WatchEnd::Exited => {
+                self.finish(Ok(EXITED_TEXT.into()));
+                // Mods may be changed again; the files may have changed too.
+                self.check(Purpose::Background);
+            }
+            // Cancel resets the state itself and supersedes the generation.
+            WatchEnd::Cancelled => self.finish(Ok(String::new())),
+        }
+        if was_running {
+            self.refresh_visible_screen();
+        }
+    }
+
+    /// Stop waiting for the game. The opener is terminated if it still runs;
+    /// a launch Steam already accepted goes on, which the status says.
+    fn cancel_launch(&self) {
+        let waiting = self
+            .weak
+            .upgrade()
+            .is_some_and(|a| a.global::<LaunchState>().get_waiting());
+        if !waiting {
+            return;
+        }
+        self.stop_watch();
+        self.next_generation();
+        self.with_state(|s| s.set_waiting(false));
+        self.finish(Ok(CANCELLED_TEXT.into()));
+    }
+
+    /// The game started or stopped: let the visible screen re-read whether it
+    /// runs, so its controls are enabled or refused to match. (Every action
+    /// still re-checks the process itself before touching files.)
+    fn refresh_visible_screen(&self) {
+        let Some(app) = self.weak.upgrade() else {
+            return;
+        };
+        match app.get_screen() {
+            1 => app.global::<InstalledState>().invoke_refresh(),
+            2 => app.global::<CrosshairState>().invoke_shown(),
+            3 => app.global::<PerfState>().invoke_shown(),
+            _ => {}
         }
     }
 
@@ -243,7 +467,8 @@ impl Launch {
                         // A repair package built for other mods or another
                         // game build keeps loading until it is rebuilt or removed.
                         let stale = shiv_repair::overlay_state(&paths) == OverlayState::Stale;
-                        ((deps.check)(&paths), stale, paths)
+                        let running = (deps.running)();
+                        ((deps.check)(&paths), stale, paths, running)
                     })
                     .map_err(|e| game_error_text(&e))
             },
@@ -264,12 +489,12 @@ impl Launch {
         &self,
         generation: u64,
         purpose: Purpose,
-        result: Result<(Vec<Finding>, bool, GamePaths), String>,
+        result: Result<(Vec<Finding>, bool, GamePaths, bool), String>,
     ) {
         if generation != self.generation.get() {
             return;
         }
-        let (findings, stale, paths) = match result {
+        let (findings, stale, paths, running) = match result {
             Ok(r) => r,
             Err(text) => {
                 self.rows.set_vec(Vec::new());
@@ -292,6 +517,19 @@ impl Launch {
             }
         });
         *self.last.borrow_mut() = Some((paths.clone(), findings.clone(), stale));
+        if running {
+            // Started outside Shiv (or before it): follow it until it exits
+            // instead of launching a second time.
+            if self.watch.borrow().is_none() {
+                self.start_watch(None);
+            }
+            if purpose != Purpose::Background {
+                self.with_state(|s| s.set_status_text(ALREADY_RUNNING_TEXT.into()));
+            } else {
+                self.with_state(|s| s.set_status_text(RUNNING_TEXT.into()));
+            }
+            return;
+        }
         let launch_now = match &purpose {
             Purpose::Background => {
                 // Debug builds only: open the review dialog for startup findings
@@ -334,30 +572,7 @@ impl Launch {
     }
 
     fn start_launch(&self, paths: GamePaths) {
-        let generation = self.next_generation();
-        self.with_state(|s| {
-            s.set_busy(true);
-            s.set_busy_text("Starting Deadlock".into());
-        });
-        let launcher = self.deps.launch.clone();
-        let weak = self.weak.clone();
-        let started = crate::spawn_worker(
-            "shiv-launch",
-            move || launcher(&paths).map_err(|e| format!("Could not launch Deadlock: {e}.")),
-            move |result| {
-                let result = result.and_then(|r| r);
-                let _ = weak.upgrade_in_event_loop(move |_| {
-                    with_launch(|l| {
-                        if generation == l.generation.get() {
-                            l.finish(result.map(|()| "Deadlock is starting through Steam.".into()));
-                        }
-                    });
-                });
-            },
-        );
-        if !started {
-            self.finish(Err("Could not start a background thread.".into()));
-        }
+        self.start_watch(Some(paths));
     }
 
     /// Clear `busy` and show the outcome below the Launch button.

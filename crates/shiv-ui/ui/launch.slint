@@ -15,6 +15,10 @@ export global LaunchState {
     // A check or launch is running on a worker thread.
     in property <bool> busy;
     in property <string> busy-text;
+    // Steam has the launch link; waiting for the game process (cancellable).
+    in property <bool> waiting;
+    // A Deadlock process is running.
+    in property <bool> running;
     // Findings of the most recent check.
     in property <[FindingRow]> findings;
     in property <string> problems-text;
@@ -29,6 +33,8 @@ export global LaunchState {
 
     callback launch();
     callback launch-anyway();
+    // Stop waiting for the game to start.
+    callback cancel-launch();
     callback cancel();
     callback review();
     // Re-check quietly (screen change).
@@ -71,10 +77,18 @@ export component LaunchPanel inherits VerticalLayout {
         wrap: word-wrap;
     }
 
+    if LaunchState.waiting: HorizontalLayout {
+        alignment: start;
+        TextButton {
+            text: "Cancel launch";
+            clicked => { LaunchState.cancel-launch(); }
+        }
+    }
+
     Button {
-        text: "Launch";
+        text: LaunchState.running ? "Running" : "Launch";
         primary: true;
-        disabled: LaunchState.busy;
+        disabled: LaunchState.busy || LaunchState.running;
         clicked => { LaunchState.launch(); }
     }
 }

@@ -2,10 +2,15 @@
 //!
 //! The URI matches the old manager's `steam_manager.rs`. The opener comes from
 //! the platform module and receives the URI as a single argument (no shell).
+//!
+//! Steam, not Shiv, starts the game: the only process Shiv owns is the opener
+//! (`xdg-open` and friends). Cancelling stops the opener if it is still
+//! running, which cannot take back a request Steam already received.
 
 use std::io;
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::game::GamePaths;
@@ -33,6 +38,8 @@ pub enum LaunchError {
     },
     #[error("{program} could not open the Steam link ({status}); is Steam installed?")]
     OpenerFailed { program: String, status: String },
+    #[error("the launch was cancelled")]
+    Cancelled,
 }
 
 /// What the opener did within [`OPENER_WAIT`].
@@ -41,6 +48,8 @@ pub enum OpenerOutcome {
     Exited(ExitStatus),
     /// Still running when the wait ended (handed off, reaped in the background).
     StillRunning,
+    /// Cancelled while the opener ran: it was terminated and reaped.
+    Cancelled,
 }
 
 /// The opener command for [`STEAM_URI`], not yet spawned.
@@ -58,7 +67,15 @@ pub fn command() -> Command {
 /// Open the Steam URI for Deadlock and report whether the opener accepted it.
 /// Blocks for up to [`OPENER_WAIT`]; call it from a worker thread.
 pub fn launch(paths: &GamePaths) -> Result<(), LaunchError> {
-    launch_with(paths, |cmd| run_opener(cmd, OPENER_WAIT))
+    launch_cancellable(paths, &AtomicBool::new(false))
+}
+
+/// [`launch`] that stops early when `cancel` is set, terminating the opener
+/// if it still runs ([`LaunchError::Cancelled`]).
+pub fn launch_cancellable(paths: &GamePaths, cancel: &AtomicBool) -> Result<(), LaunchError> {
+    launch_with(paths, |cmd| {
+        run_opener_cancellable(cmd, OPENER_WAIT, cancel)
+    })
 }
 
 /// [`launch`] with an injectable runner, so tests never start Steam.
@@ -73,6 +90,7 @@ pub fn launch_with(
     let program = cmd.get_program().to_string_lossy().into_owned();
     match run(cmd) {
         Err(source) => Err(LaunchError::Spawn { program, source }),
+        Ok(OpenerOutcome::Cancelled) => Err(LaunchError::Cancelled),
         Ok(OpenerOutcome::Exited(status))
             if !status.success() && platform::opener_exit_status_is_meaningful() =>
         {
@@ -87,12 +105,28 @@ pub fn launch_with(
 
 /// Spawn `cmd` and wait up to `wait` for it to exit. A child still running
 /// after that is reaped on a helper thread so it never lingers as a zombie.
-pub fn run_opener(mut cmd: Command, wait: Duration) -> io::Result<OpenerOutcome> {
+pub fn run_opener(cmd: Command, wait: Duration) -> io::Result<OpenerOutcome> {
+    run_opener_cancellable(cmd, wait, &AtomicBool::new(false))
+}
+
+/// [`run_opener`] that terminates and reaps the opener when `cancel` is set.
+/// Only the opener itself is stopped: a Steam client it started keeps running.
+pub fn run_opener_cancellable(
+    mut cmd: Command,
+    wait: Duration,
+    cancel: &AtomicBool,
+) -> io::Result<OpenerOutcome> {
     let mut child = cmd.spawn()?;
     let start = Instant::now();
     loop {
         if let Some(status) = child.try_wait()? {
             return Ok(OpenerOutcome::Exited(status));
+        }
+        if cancel.load(Ordering::Relaxed) {
+            // Fails only if it exited meanwhile; wait() reaps it either way.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(OpenerOutcome::Cancelled);
         }
         if start.elapsed() >= wait {
             let _ = std::thread::Builder::new()
@@ -165,6 +199,33 @@ mod tests {
     fn opener_still_running_counts_as_handed_off() {
         let (_dir, paths) = game();
         launch_with(&paths, |_| Ok(OpenerOutcome::StillRunning)).unwrap();
+    }
+
+    #[test]
+    fn cancelled_opener_is_reported() {
+        let (_dir, paths) = game();
+        let err = launch_with(&paths, |_| Ok(OpenerOutcome::Cancelled)).unwrap_err();
+        assert!(matches!(err, LaunchError::Cancelled), "{err}");
+    }
+
+    /// Cancel terminates an opener that is still running, promptly.
+    #[cfg(unix)]
+    #[test]
+    fn run_opener_terminates_the_opener_on_cancel() {
+        use std::sync::Arc;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let flag = cancel.clone();
+        let setter = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            flag.store(true, Ordering::Relaxed);
+        });
+        let mut slow = Command::new("sleep");
+        slow.arg("30");
+        let start = Instant::now();
+        let out = run_opener_cancellable(slow, Duration::from_secs(20), &cancel).unwrap();
+        setter.join().unwrap();
+        assert_eq!(out, OpenerOutcome::Cancelled);
+        assert!(start.elapsed() < Duration::from_secs(5));
     }
 
     #[test]
