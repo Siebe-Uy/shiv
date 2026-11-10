@@ -644,6 +644,8 @@ pub fn analyze(paths: &GamePaths, build_id: u64) -> Vec<ModHealth> {
     };
     // Learned only in memory here; `apply` saves what it learns.
     let mut observed = load_history(&overlay_dir(paths));
+    // Decoded once for all mods here and freed when the check returns.
+    let _embedded = VdataHistoryIndex::embedded();
     let mut recorded = BTreeSet::new();
     let checked_at = chrono::Utc::now();
     let mut out = Vec::with_capacity(installed.len());

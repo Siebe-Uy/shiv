@@ -26,7 +26,33 @@ pub(crate) fn locate_game() -> Result<GamePaths, GameError> {
     game::locate()
 }
 
+/// glibc otherwise raises its mmap and trim thresholds as large blocks are
+/// freed (up to 32 and 64 MiB), after which worker threads' freed memory (a
+/// repair check, decoded images) stays resident and `malloc_trim` cannot
+/// release a thread arena's top. Fixed thresholds hand blocks of 128 KiB or
+/// more back on free and trim each heap once 128 KiB at its top are free.
+fn tune_allocator() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: mallopt only changes allocator tuning; it is called before any
+    // other thread exists.
+    unsafe {
+        libc::mallopt(libc::M_MMAP_THRESHOLD, 128 * 1024);
+        libc::mallopt(libc::M_TRIM_THRESHOLD, 128 * 1024);
+    }
+}
+
+/// Return freed heap pages to the OS (glibc only keeps them otherwise).
+pub(crate) fn release_freed_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: malloc_trim only releases free memory held by the allocator;
+    // it takes no pointers and is safe to call from any thread.
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
 fn main() -> Result<(), slint::PlatformError> {
+    tune_allocator();
     let app = App::new()?;
     // Override for testing (e.g. an unreachable URL to see the Retry state).
     let api_url = std::env::var("SHIV_API_URL").unwrap_or_else(|_| DEFAULT_API_URL.to_owned());

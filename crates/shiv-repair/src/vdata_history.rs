@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 use vpkmanager::source2::kv3::{Seg as Kv3Seg, Value as Kv3Value};
 
 const MAGIC: &[u8; 8] = b"DMMVDH03";
@@ -12,6 +12,9 @@ const MIN_COMPARABLE_ROWS: usize = 32;
 const MAX_CHANGED_PERCENT: usize = 10;
 
 type Fingerprint = [u8; FINGERPRINT_SIZE];
+/// Sorted, unique `(binding key, value)` pairs. A flat list costs 64 bytes a
+/// pair; a map of sets cost several hundred (about 60 MB for the embedded index).
+type StringBindings = Vec<(Fingerprint, Fingerprint)>;
 
 #[derive(Debug, Clone)]
 struct FingerprintChange {
@@ -83,9 +86,12 @@ impl CandidateIntent {
 
 #[derive(Debug, Clone, Default)]
 pub struct VdataHistoryIndex {
-    tables: BTreeMap<String, TableHistory>,
-    fallback: BTreeMap<String, TableHistory>,
-    observed_strings: BTreeMap<Fingerprint, BTreeSet<Fingerprint>>,
+    // Shared, so combining with the embedded index does not copy it.
+    tables: Arc<BTreeMap<String, TableHistory>>,
+    fallback: Arc<BTreeMap<String, TableHistory>>,
+    observed_strings: Arc<StringBindings>,
+    /// Bindings of the index this one was combined with (`with_observed`).
+    fallback_strings: Arc<StringBindings>,
 }
 
 /// Immutable fingerprints of one observed game table. Keeping these separate
@@ -163,18 +169,27 @@ impl VdataHistoryIndex {
     ) -> bool {
         let key = field_key(row_name, &[Kv3Seg::Key(field_name.into())]);
         let value = value_fingerprint(&Kv3Value::String(value.into()), FingerprintMode::Exact);
-        self.observed_strings
-            .get(&string_binding_key(file_path, key))
-            .is_some_and(|values| values.contains(&value))
+        let pair = (string_binding_key(file_path, key), value);
+        self.observed_strings.binary_search(&pair).is_ok()
+            || self.fallback_strings.binary_search(&pair).is_ok()
     }
 
+    /// The history shipped with Shiv. It is decoded on first use and freed
+    /// once the last holder drops it, so it costs no memory between checks;
+    /// hold one across a batch of checks to decode it once.
     #[must_use]
-    pub fn embedded() -> &'static Self {
-        static INDEX: OnceLock<VdataHistoryIndex> = OnceLock::new();
-        INDEX.get_or_init(|| {
+    pub fn embedded() -> Arc<Self> {
+        static INDEX: Mutex<Weak<VdataHistoryIndex>> = Mutex::new(Weak::new());
+        let mut cached = INDEX.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(index) = cached.upgrade() {
+            return index;
+        }
+        let index = Arc::new(
             Self::from_bytes(include_bytes!("../assets/vdata-history.bin"))
-                .expect("embedded VData history index must be valid")
-        })
+                .expect("embedded VData history index must be valid"),
+        );
+        *cached = Arc::downgrade(&index);
+        index
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
@@ -186,7 +201,12 @@ impl VdataHistoryIndex {
         let exact = magic != LEGACY_MAGIC;
         let table_count = reader.u32()? as usize;
         let mut tables = BTreeMap::new();
-        let mut observed_strings = BTreeMap::<Fingerprint, BTreeSet<Fingerprint>>::new();
+        let mut observed_strings = StringBindings::new();
+        if magic == LEGACY_MAGIC || magic == EXACT_MAGIC {
+            // Each carried field value takes 65 input bytes and 64 here, so this
+            // bounds the list without regrowing it (trimmed below).
+            observed_strings.reserve(bytes.len() / (2 * FINGERPRINT_SIZE + 1));
+        }
         for _ in 0..table_count {
             let path = reader.string()?;
             let build_count = reader.u32()? as usize;
@@ -201,14 +221,11 @@ impl VdataHistoryIndex {
                 let fields = reader.changes()?;
                 if magic != MAGIC {
                     // Older files only retain fingerprints, so carry all known field values forward.
-                    for field in &fields {
-                        if let Some(value) = field.value {
-                            observed_strings
-                                .entry(string_binding_key(&path, field.key))
-                                .or_default()
-                                .insert(value);
-                        }
-                    }
+                    observed_strings.extend(fields.iter().filter_map(|field| {
+                        field
+                            .value
+                            .map(|value| (string_binding_key(&path, field.key), value))
+                    }));
                 }
                 builds.push(BuildDelta {
                     version,
@@ -220,6 +237,7 @@ impl VdataHistoryIndex {
             tables.insert(normalize_path(&path), TableHistory { exact, builds });
         }
         if magic == MAGIC {
+            let mut bindings = BTreeMap::<Fingerprint, BTreeSet<Fingerprint>>::new();
             let count = reader.u32()? as usize;
             if count > reader.remaining.len() / 36 {
                 return Err("String binding count exceeds its payload".into());
@@ -233,16 +251,25 @@ impl VdataHistoryIndex {
                 let values = (0..count)
                     .map(|_| reader.fingerprint())
                     .collect::<Result<_, _>>()?;
-                observed_strings.insert(key, values);
+                bindings.insert(key, values);
             }
+            observed_strings.extend(
+                bindings
+                    .into_iter()
+                    .flat_map(|(key, values)| values.into_iter().map(move |value| (key, value))),
+            );
         }
         if !reader.is_empty() {
             return Err("VData history index has trailing bytes".to_string());
         }
+        observed_strings.sort_unstable();
+        observed_strings.dedup();
+        observed_strings.shrink_to_fit();
         Ok(Self {
-            tables,
-            fallback: BTreeMap::new(),
-            observed_strings,
+            tables: Arc::new(tables),
+            fallback: Arc::default(),
+            observed_strings: Arc::new(observed_strings),
+            fallback_strings: Arc::default(),
         })
     }
 
@@ -418,14 +445,19 @@ impl VdataHistoryIndex {
 
     pub fn with_observed(&self, observed: &Self) -> Self {
         let mut history = observed.clone();
-        history.fallback = self.tables.clone();
-        for (key, values) in &self.observed_strings {
-            history
-                .observed_strings
-                .entry(*key)
-                .or_default()
-                .extend(values);
+        history.fallback = Arc::clone(&self.tables);
+        // Both sides' bindings are visible; `self`'s are shared, not copied.
+        if !observed.fallback_strings.is_empty() {
+            history.observed_strings = Arc::new(union(
+                &observed.observed_strings,
+                &observed.fallback_strings,
+            ));
         }
+        history.fallback_strings = if self.fallback_strings.is_empty() {
+            Arc::clone(&self.observed_strings)
+        } else {
+            Arc::new(union(&self.observed_strings, &self.fallback_strings))
+        };
         history
     }
 
@@ -451,12 +483,21 @@ impl VdataHistoryIndex {
             fields,
             bindings,
         } = snapshot;
-        let mut bindings_changed = false;
-        for (&key, &value) in bindings {
-            bindings_changed |= self.observed_strings.entry(key).or_default().insert(value);
+        let new: Vec<_> = bindings
+            .iter()
+            .map(|(&key, &value)| (key, value))
+            .filter(|pair| {
+                self.observed_strings.binary_search(pair).is_err()
+                    && self.fallback_strings.binary_search(pair).is_err()
+            })
+            .collect();
+        let bindings_changed = !new.is_empty();
+        if bindings_changed {
+            let strings = Arc::make_mut(&mut self.observed_strings);
+            strings.extend(new);
+            strings.sort_unstable();
         }
-        let table = self
-            .tables
+        let table = Arc::make_mut(&mut self.tables)
             .entry(normalize_path(file_path))
             .or_insert_with(|| TableHistory {
                 exact: true,
@@ -502,7 +543,7 @@ impl VdataHistoryIndex {
     pub fn to_bytes(&self) -> Result<Vec<u8>, String> {
         let mut output = MAGIC.to_vec();
         push_u32(&mut output, self.tables.len())?;
-        for (path, table) in &self.tables {
+        for (path, table) in self.tables.iter() {
             if !table.exact {
                 return Err("Approximate history cannot be written as exact history".into());
             }
@@ -515,7 +556,10 @@ impl VdataHistoryIndex {
                 push_changes(&mut output, &build.fields)?;
             }
         }
-        write_string_bindings(&mut output, &self.observed_strings)?;
+        write_string_bindings(
+            &mut output,
+            &union(&self.observed_strings, &self.fallback_strings),
+        )?;
         Ok(output)
     }
 }
@@ -582,7 +626,7 @@ pub fn encode_history_index(tables: &[(String, Vec<(u32, Kv3Value)>)]) -> Result
     let mut output = Vec::new();
     output.extend_from_slice(MAGIC);
     push_u32(&mut output, tables.len())?;
-    let mut strings = BTreeMap::<Fingerprint, BTreeSet<Fingerprint>>::new();
+    let mut strings = StringBindings::new();
     for (path, snapshots) in tables {
         push_string(&mut output, path)?;
         push_u32(&mut output, snapshots.len())?;
@@ -590,9 +634,7 @@ pub fn encode_history_index(tables: &[(String, Vec<(u32, Kv3Value)>)]) -> Result
         let mut previous_exact_rows = BTreeMap::new();
         let mut previous_fields = BTreeMap::new();
         for (version, root) in snapshots {
-            for (key, value) in string_bindings(path, root) {
-                strings.entry(key).or_default().insert(value);
-            }
+            strings.extend(string_bindings(path, root));
             let rows = row_fingerprints(root, FingerprintMode::Discovery).ok_or_else(|| {
                 format!("Historical {path} build {version} root is not an object")
             })?;
@@ -610,6 +652,8 @@ pub fn encode_history_index(tables: &[(String, Vec<(u32, Kv3Value)>)]) -> Result
             previous_fields = fields;
         }
     }
+    strings.sort_unstable();
+    strings.dedup();
     write_string_bindings(&mut output, &strings)?;
     Ok(output)
 }
@@ -655,15 +699,23 @@ fn string_bindings(file_path: &str, root: &Kv3Value) -> BTreeMap<Fingerprint, Fi
     output
 }
 
-fn write_string_bindings(
-    output: &mut Vec<u8>,
-    bindings: &BTreeMap<Fingerprint, BTreeSet<Fingerprint>>,
-) -> Result<(), String> {
-    push_u32(output, bindings.len())?;
-    for (key, values) in bindings {
-        output.extend_from_slice(key);
-        push_u32(output, values.len())?;
-        for value in values {
+fn union(a: &[(Fingerprint, Fingerprint)], b: &[(Fingerprint, Fingerprint)]) -> StringBindings {
+    let mut all = Vec::with_capacity(a.len() + b.len());
+    all.extend_from_slice(a);
+    all.extend_from_slice(b);
+    all.sort_unstable();
+    all.dedup();
+    all
+}
+
+/// `bindings` is sorted, so each key's values are adjacent and in order.
+fn write_string_bindings(output: &mut Vec<u8>, bindings: &StringBindings) -> Result<(), String> {
+    let groups: Vec<_> = bindings.chunk_by(|a, b| a.0 == b.0).collect();
+    push_u32(output, groups.len())?;
+    for group in groups {
+        output.extend_from_slice(&group[0].0);
+        push_u32(output, group.len())?;
+        for (_, value) in group {
             output.extend_from_slice(value);
         }
     }

@@ -687,7 +687,7 @@ mod tests {
             let resources = ResourceSnapshot::open(&citadel, &mods).unwrap();
             unloaded_models(
                 &resources,
-                VdataHistoryIndex::embedded(),
+                &VdataHistoryIndex::embedded(),
                 warnings.iter().map(|warning| warning.file_path.as_str()),
             )
             .unwrap()

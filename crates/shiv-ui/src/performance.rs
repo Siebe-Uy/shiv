@@ -473,7 +473,10 @@ impl Perf {
         // The catalog was parsed on a worker thread, so glibc keeps its pages
         // in that thread's arena after the drop. Trim once the list's row
         // components are gone too (they are released on the next frames).
-        slint::Timer::single_shot(std::time::Duration::from_secs(1), release_freed_memory);
+        slint::Timer::single_shot(
+            std::time::Duration::from_secs(1),
+            crate::release_freed_memory,
+        );
     }
 
     /// Load the catalog and the file.
@@ -1132,16 +1135,6 @@ impl Perf {
             s.set_result_detail(detail.into());
             s.set_result_error(error);
         });
-    }
-}
-
-/// Return freed heap pages to the OS (glibc only keeps them otherwise).
-fn release_freed_memory() {
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    // SAFETY: malloc_trim only releases free memory held by the allocator;
-    // it takes no pointers and is safe to call from any thread.
-    unsafe {
-        libc::malloc_trim(0);
     }
 }
 

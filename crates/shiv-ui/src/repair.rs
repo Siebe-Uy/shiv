@@ -373,6 +373,9 @@ impl Repair {
         let weak = self.weak.clone();
         let started = spawn("shiv-repair-scan", move || {
             let result = scan(&deps);
+            // The check decodes the embedded game history (tens of MB) in
+            // this thread's arena; hand it back now that it is freed.
+            crate::release_freed_memory();
             let _ = weak.upgrade_in_event_loop(move |_| {
                 with_repair(|r| r.scanned(generation, result));
             });
@@ -455,6 +458,7 @@ impl Repair {
         let weak = self.weak.clone();
         let started = spawn("shiv-repair-action", move || {
             let result = run_action(&deps, &action, &names);
+            crate::release_freed_memory();
             let _ = weak.upgrade_in_event_loop(move |_| {
                 with_repair(|r| r.acted(failed_title, result));
             });

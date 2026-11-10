@@ -489,7 +489,7 @@ impl LocalizationOverlayPlan {
             citadel_dir,
             mods,
             historical_localization,
-            VdataHistoryIndex::embedded(),
+            &VdataHistoryIndex::embedded(),
         )
     }
 
@@ -503,7 +503,7 @@ impl LocalizationOverlayPlan {
         Self::build_snapshot(
             mods,
             HistoricalLocalizationIndex::embedded(),
-            VdataHistoryIndex::embedded(),
+            &VdataHistoryIndex::embedded(),
             &resources,
             enabled_mod_ids,
             &|_| {},
@@ -4687,7 +4687,7 @@ pub(crate) mod tests {
         let resources = resources::ResourceSnapshot::open(&citadel, &mods).unwrap();
         println!("resource index in {:?}", started.elapsed());
         let started = std::time::Instant::now();
-        let history = VdataHistoryIndex::embedded();
+        let history = &*VdataHistoryIndex::embedded();
         let localization = HistoricalLocalizationIndex::embedded();
         println!("history index in {:?}", started.elapsed());
         let started = std::time::Instant::now();
