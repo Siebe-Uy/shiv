@@ -99,7 +99,18 @@ updater complexity, telemetry, i18n at launch.
   description from the existing v2 API. Rows show the last updated date
   (GameBanana update, else files update). NSFW mods are listed with a tag and
   a blurred thumbnail until Show NSFW is switched on (off every session).
-  Install asks which file to use when a mod has more than one download. API changes are out of scope unless
+  Install asks which file to use when a mod has more than one download.
+  Clicking a row opens the mod's detail page inside Browse: name, author,
+  category and hero, tags, downloads, likes, added and last updated dates,
+  the description as plain text (HTML and BBCode removed, entities decoded,
+  capped at 12,000 characters), an image gallery (large image with
+  Previous/Next, arrow keys and a thumbnail strip; loaded lazily, fitted to
+  960x540, at most four decoded images kept and all dropped on Back; a failed
+  image shows a placeholder), "Open on GameBanana" (https links only, through
+  the system opener) and the same Install/Cancel controls and file picker as
+  the list, sharing its state. NSFW images stay blurred there too until Show
+  NSFW is on. Back (or Escape) returns to the list with its search, filters
+  and scroll position. API changes are out of scope unless
   the builder finds a blocker. Online only, no offline mode.
 - **Crosshair:** apply path and controls follow the current app's behaviour
   (full parity with `config-generator.ts`); no community crosshair browser.
