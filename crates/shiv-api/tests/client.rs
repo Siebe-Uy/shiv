@@ -249,3 +249,76 @@ fn list_mods_all_valid_unchanged() {
     );
     assert_eq!(mods[1].remote_id, "2");
 }
+
+mod gamebanana {
+    use super::{json, stub};
+    use shiv_api::{Comments, GameBananaClient};
+
+    #[test]
+    fn files_skip_archived_and_sort_newest_first() {
+        let url = stub(1, |req| {
+            assert_eq!(req.url(), "/Mod/42/ProfilePage");
+            json(
+                r#"{"_aFiles":[
+                {"_sFile":"old.zip","_nFilesize":10,"_tsDateAdded":100,"_nDownloadCount":5},
+                {"_sFile":"new.zip","_nFilesize":20,"_tsDateAdded":200,"_nDownloadCount":7},
+                {"_sFile":"gone.zip","_bIsArchived":true},{"_nFilesize":1}]}"#,
+            )
+        });
+        let files = GameBananaClient::new(&url).files("42", false).unwrap();
+        let names: Vec<_> = files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["new.zip", "old.zip"]);
+        assert_eq!((files[0].size, files[0].downloads), (20, 7));
+    }
+
+    #[test]
+    fn changelog_reads_versions_and_change_lists() {
+        let url = stub(1, |req| {
+            assert_eq!(req.url(), "/Sound/9/Updates?_nPage=2&_nPerpage=15");
+            json(
+                r#"{"_aMetadata":{"_nRecordCount":31,"_bIsComplete":false},"_aRecords":[
+                {"_sName":"Fix","_sVersion":"1.2","_tsDateAdded":5,"_sText":"",
+                 "_aChangeLog":[{"cat":"Bugfix","text":"Fixed it"},{"cat":"x","text":""}]},
+                {"_sName":"Secret","_bIsPrivate":true}]}"#,
+            )
+        });
+        let page = GameBananaClient::new(&url).changelog("9", true, 2).unwrap();
+        assert_eq!(
+            (page.total, page.complete, page.items.len()),
+            (31, false, 1)
+        );
+        let e = &page.items[0];
+        assert_eq!(e.version.as_deref(), Some("1.2"));
+        assert_eq!(e.changes, [("Bugfix".to_owned(), "Fixed it".to_owned())]);
+    }
+
+    #[test]
+    fn comments_skip_trashed_and_report_hidden() {
+        let url = stub(2, |req| {
+            if req.url().starts_with("/Mod/1/") {
+                json(
+                    r#"{"_aMetadata":{"_nRecordCount":2,"_bIsComplete":true},"_aRecords":[
+                    {"_nStatus":"0","_sText":"<p>Nice</p>","_nReplyCount":1,"_aPoster":{"_sName":"Ann"}},
+                    {"_nStatus":"3","_sText":"[trashed]"}]}"#,
+                )
+            } else {
+                json(r#"{"_sErrorCode":"COMMENT_MODE_HIDDEN","_sErrorMessage":"hidden"}"#)
+            }
+        });
+        let client = GameBananaClient::new(&url);
+        let Comments::Page(page) = client.comments("1", false, 1).unwrap() else {
+            panic!("expected comments");
+        };
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].author, "Ann");
+        assert_eq!(page.items[0].replies, 1);
+        assert_eq!(client.comments("2", false, 1).unwrap(), Comments::Hidden);
+    }
+
+    #[test]
+    fn ids_must_be_digits() {
+        let client = GameBananaClient::new("http://127.0.0.1:1");
+        assert!(client.files("../x", false).is_err());
+        assert!(client.comments("", false, 1).is_err());
+    }
+}
