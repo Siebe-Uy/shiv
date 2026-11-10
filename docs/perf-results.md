@@ -54,10 +54,26 @@ With only the repair-engine fix and `malloc_trim` (no `mallopt`), the scroll run
 
 Browse scroll creep: live heap goes 24.7 -> 50.3 MB while scrolling and then stays flat; that is the thumbnail LRU filling its 24 MiB budget (bounded, as designed). The rest of the old growth (139 MB RSS against 50 MB live heap) was allocator retention in the four thumbnail worker arenas plus file-backed pages for the image decoders (RssFile +8.6 MB); the fixed thresholds cut it by about 23 MB. RSS still rises about 3 MB between 30 s and 60 s of scrolling (fragmentation); no unbounded structure was found.
 
+### Fix round 2: final tree (`df9a76a`) and scroll CPU
+
+Same measuring patch (reverted afterwards), extended to read utime+stime over the 60 s scroll. Two runs each, alternating, same session; "before" is the pre-fix binary (no allocator thresholds), "final" is the committed tree with the thresholds and the last `record_snapshot` change.
+
+| | Before (run 1 / run 2) | Final (run 1 / run 2) |
+| --- | --- | --- |
+| CPU ticks, 60 s scroll | 1034 / 991 (mean 1012, 16.9 % of a core) | 1078 / 1062 (mean 1070, 17.8 % of a core) |
+| Idle CPU ticks, 20 s | 1 / 1 | 1 / 1 |
+| 10 s after scroll | 139.0 / 136.0 MB | 115.6 / 114.5 MB |
+| Repair shown | 310.6 MB (run 2) | 120.5 / 120.2 MB |
+| After apply | 393.7 MB (run 2) | 120.5 / 120.3 MB |
+| Left Performance | 220.6 MB (run 2) | 121.4 / 121.1 MB |
+| Peak VmHWM | 393.7 MB | 146.8 / 145.7 MB |
+
+Scroll CPU is about 6 % higher with the fixed thresholds (about +0.9 points of one core), consistent across both pairs; the 959 ticks in the first table came from an earlier session and are not directly comparable. The thresholds were not changed.
+
 ## Verdict against the 150 MB target
 
 - Browse idle: 73 MB, pass. Browse after scrolling the full list: 116 MB, pass (was 139 MB).
-- Repair (tiny fixture): pass after fix round 1. Shown and applied stay at 120.5 MB after a full scroll (85 MB in a fresh process); peak 147.5 MB, just under the target, reached only when a Repair check runs on top of a full thumbnail cache. Before the fix: FAIL (313 MB, peak 394 MB).
+- Repair (tiny fixture): pass after fix round 1. Shown and applied stay at about 120.5 MB after a full scroll (85 MB in a fresh process); peak 145.7-147.5 MB across three runs, just under the target, reached only when a Repair check runs on top of a full thumbnail cache. Before the fix: FAIL (313 MB, peak 394 MB).
 - Thumbnails: placeholders show while scrolling at 25,000 px/s; they fill in when scrolling stops (LRU cache is bounded).
 
 ## Scrolling feel: OPEN (owner)
