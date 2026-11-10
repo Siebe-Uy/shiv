@@ -395,11 +395,13 @@ mod tests {
         assert!(state.get_can_apply());
     }
 
-    /// Crosshair against a temp autoexec.cfg (never the real one): showing
-    /// the screen loads the managed block off-thread; a slider edit updates
-    /// the values the preview draws and the commands; a running game refuses
-    /// Apply; Apply keeps the user's lines and replaces the block; edits are
-    /// dropped while an apply writes; unapplied edits survive a re-show.
+    /// Crosshair against a temp install and a temp Steam userdata folder
+    /// (never the real ones): showing the screen loads the hero settings
+    /// off-thread; a slider edit updates the values the preview draws and the
+    /// commands; a running game refuses Apply; Apply writes the hero settings,
+    /// keeps the user's other settings and drops the old autoexec block;
+    /// edits are dropped while an apply writes; unapplied edits survive a
+    /// re-show; a missing Steam shows a clear error.
     fn crosshair_flow() {
         use shiv_core::crosshair::{self as core, CrosshairConfig};
         use std::sync::Arc;
@@ -408,25 +410,33 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let paths = shiv_core::game::GamePaths::from_root(temp.path().join("Deadlock"));
         std::fs::create_dir_all(paths.autoexec.parent().expect("cfg dir")).expect("mkdir");
-        let saved = CrosshairConfig {
-            gap: 5.0,
-            ..CrosshairConfig::default()
-        };
+        let user_dir = temp.path().join("Steam/userdata/42/1422450");
+        let lst = core::user_settings_path(&user_dir);
+        std::fs::create_dir_all(lst.parent().expect("remote cfg")).expect("mkdir");
+        std::fs::write(
+            &lst,
+            core::EMPTY_SETTINGS.replace(
+                "base = {}",
+                "base = { mouse_sens = \"1.5\" crosshair_pip_gap = \"5\" }",
+            ),
+        )
+        .expect("hero settings");
+        // An autoexec crosshair from the first release would override the
+        // hero settings at every launch; Apply removes it.
         let user = "bind mouse4 \"+jump\"\nfps_max 240\n";
         std::fs::write(
             &paths.autoexec,
             format!(
-                "{user}{}\n{}\n{}\n",
-                core::SECTION_START,
-                core::to_commands(&saved),
-                core::SECTION_END
+                "{user}// === Shiv - Crosshair Settings (DO NOT EDIT) ===\ncitadel_crosshair_pip_gap 9\n// === End Shiv Crosshair Settings ===\n"
             ),
         )
         .expect("autoexec");
 
         let running = Arc::new(AtomicBool::new(false));
         let gate = Arc::new(AtomicBool::new(false));
+        let no_steam = Arc::new(AtomicBool::new(false));
         let (flag, gate_in, located) = (running.clone(), gate.clone(), paths.clone());
+        let (no_steam_in, user_in) = (no_steam.clone(), user_dir.clone());
         let app = App::new().expect("app");
         crosshair::attach_with(
             &app,
@@ -438,6 +448,13 @@ mod tests {
                     Ok(located.clone())
                 }),
                 running: Arc::new(move || flag.load(Ordering::Relaxed)),
+                user_dir: Arc::new(move || {
+                    if no_steam_in.load(Ordering::Relaxed) {
+                        Err(core::CrosshairError::SteamNotFound)
+                    } else {
+                        Ok(user_in.clone())
+                    }
+                }),
             },
         );
         app.show().expect("show");
@@ -447,7 +464,7 @@ mod tests {
             !s.get_loading() && !s.get_busy()
         };
 
-        // Defaults until shown; showing reads autoexec.cfg on a worker.
+        // Defaults until shown; showing reads the hero settings on a worker.
         assert_eq!(state.get_values().pip_gap, 0.0);
         // (`changed screen` runs on the event loop, not inside set_screen.)
         app.set_screen(2);
@@ -461,7 +478,7 @@ mod tests {
         assert_eq!(v.gap_px, 21.0);
         assert_eq!(
             state.get_status().as_str(),
-            "Same as the crosshair in autoexec.cfg"
+            "Same as the crosshair in your Steam settings"
         );
 
         // A slider step (through its accessibility action, like a keyboard
@@ -519,7 +536,7 @@ mod tests {
         assert_eq!(state.get_values().pip_gap, 6.0);
 
         // Game running: Apply is refused and nothing is written.
-        let before = std::fs::read_to_string(&paths.autoexec).expect("read");
+        let before = std::fs::read_to_string(&lst).expect("read");
         running.store(true, Ordering::Relaxed);
         state.invoke_apply();
         assert!(state.get_busy());
@@ -527,10 +544,7 @@ mod tests {
         assert!(state.get_result_error());
         assert!(state.get_result_detail().contains("Deadlock is running"));
         assert!(state.get_game_running());
-        assert_eq!(
-            std::fs::read_to_string(&paths.autoexec).expect("read"),
-            before
-        );
+        assert_eq!(std::fs::read_to_string(&lst).expect("read"), before);
         running.store(false, Ordering::Relaxed);
 
         // Busy guard: while an apply is in flight, edits and a second apply
@@ -551,13 +565,16 @@ mod tests {
         assert!(!state.get_game_running());
         assert_eq!(
             state.get_status().as_str(),
-            "Same as the crosshair in autoexec.cfg"
+            "Same as the crosshair in your Steam settings"
         );
-        let text = std::fs::read_to_string(&paths.autoexec).expect("read");
-        assert!(text.starts_with(user), "{text}");
-        assert_eq!(text.matches(core::SECTION_START).count(), 1, "{text}");
-        assert!(text.contains(&core::to_commands(&edited)), "{text}");
-        assert_eq!(core::load(&paths).expect("load"), Some(edited));
+        let text = std::fs::read_to_string(&lst).expect("read");
+        assert!(text.contains("mouse_sens = \"1.5\""), "{text}");
+        assert!(text.contains("crosshair_pip_gap = \"6\""), "{text}");
+        assert_eq!(
+            std::fs::read_to_string(&paths.autoexec).expect("read"),
+            user
+        );
+        assert_eq!(core::load(&paths, &user_dir).expect("load"), Some(edited));
 
         // Reset shows the default; a fresh show (no edits) re-reads the file.
         click(&app, "Reset to default");
@@ -574,14 +591,34 @@ mod tests {
         assert!(run_until(&app, Duration::from_secs(20), idle));
         assert_eq!(state.get_values().pip_gap, 0.0);
         assert_eq!(
-            core::load(&paths).expect("load"),
+            core::load(&paths, &user_dir).expect("load"),
             Some(CrosshairConfig::default())
         );
-        assert!(
-            std::fs::read_to_string(&paths.autoexec)
-                .expect("read")
-                .starts_with(user)
+
+        // No Steam: reading and applying both say so; editing still works.
+        no_steam.store(true, Ordering::Relaxed);
+        state.invoke_shown();
+        assert!(run_until(&app, Duration::from_secs(20), idle));
+        assert!(state.get_result_error());
+        assert_eq!(
+            state.get_result_title().as_str(),
+            "Couldn't read your crosshair settings"
         );
+        assert!(
+            state.get_result_detail().contains("Steam was not found"),
+            "{}",
+            state.get_result_detail()
+        );
+        state.invoke_edit(CrosshairField::PipGap, 3.0);
+        assert_eq!(state.get_values().pip_gap, 3.0);
+        state.invoke_apply();
+        assert!(run_until(&app, Duration::from_secs(20), idle));
+        assert_eq!(
+            state.get_result_title().as_str(),
+            "Couldn't apply the crosshair"
+        );
+        assert!(state.get_result_detail().contains("Steam was not found"));
+        no_steam.store(false, Ordering::Relaxed);
     }
 
     /// Launch against a temp install with a fake launcher (Steam is never

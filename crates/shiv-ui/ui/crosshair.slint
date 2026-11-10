@@ -1,5 +1,5 @@
 // Crosshair: edit the game's crosshair with a live preview, then write it to
-// the managed block in autoexec.cfg.
+// the signed-in Steam account's hero settings (citadel_hero_settings.lst).
 
 import { ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
@@ -30,12 +30,12 @@ export struct CrosshairValues {
 
 export global CrosshairState {
     in property <CrosshairValues> values;
-    // The console commands Apply writes.
+    // The same crosshair as console commands, for pasting into the game.
     in property <string> commands;
     in property <[color]> presets;
-    // Reading autoexec.cfg on a worker thread.
+    // Reading the hero settings on a worker thread.
     in property <bool> loading;
-    // Writing autoexec.cfg on a worker thread.
+    // Writing the hero settings on a worker thread.
     in property <bool> busy;
     in property <bool> game-running;
     // Line under the title: where the shown crosshair came from.
@@ -245,8 +245,8 @@ export component CrosshairPage inherits Rectangle {
                     font-weight: 600;
                 }
                 Text {
-                    text: CrosshairState.busy ? "Writing autoexec.cfg"
-                        : CrosshairState.loading ? "Reading autoexec.cfg"
+                    text: CrosshairState.busy ? "Saving to your Steam settings"
+                        : CrosshairState.loading ? "Reading your Steam settings"
                         : CrosshairState.status;
                     color: Theme.text-muted;
                     font-size: Theme.text-md;

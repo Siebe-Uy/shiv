@@ -1,14 +1,16 @@
 //! Crosshair screen controller: edits a `CrosshairConfig`, mirrors it into
-//! `CrosshairState` for the live preview, and writes it to `autoexec.cfg`.
+//! `CrosshairState` for the live preview, and writes it to the signed-in
+//! Steam account's `citadel_hero_settings.lst` (see `shiv_core::crosshair`).
 //!
-//! Edits are pure and run on the UI thread. Reading and writing
-//! `autoexec.cfg` run on worker threads that post back with
+//! Edits are pure and run on the UI thread. Finding Steam and reading and
+//! writing the settings run on worker threads that post back with
 //! `upgrade_in_event_loop`, like the other screens. Showing the screen
-//! reloads the managed block unless there are unapplied edits. Apply is
+//! reloads the settings unless there are unapplied edits. Apply is
 //! refused while another apply runs, and while Deadlock runs (checked on the
 //! worker), as the old app refused it.
 
 use std::cell::{Cell, RefCell};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::thread;
@@ -20,12 +22,17 @@ use crate::browse::game_error_text;
 use crate::installed::{Locate, Running};
 use crate::{App, CrosshairField, CrosshairState, CrosshairValues};
 
-/// Where the game is and whether it runs; injectable so tests never touch the
-/// real install or depend on a running game.
+/// The signed-in account's `userdata/<account>/1422450` folder.
+pub(crate) type UserDir = Arc<dyn Fn() -> Result<PathBuf, CrosshairError> + Send + Sync>;
+
+/// Where the game and the Steam user folder are, and whether the game runs;
+/// injectable so tests never touch the real install or Steam userdata, or
+/// depend on a running game.
 #[derive(Clone)]
 pub(crate) struct Deps {
     pub locate: Locate,
     pub running: Running,
+    pub user_dir: UserDir,
 }
 
 impl Deps {
@@ -33,6 +40,7 @@ impl Deps {
         Deps {
             locate: Arc::new(crate::locate_game),
             running: Arc::new(shiv_core::game::is_running),
+            user_dir: Arc::new(|| crosshair::user_dir(&crosshair::locate_steam()?)),
         }
     }
 }
@@ -132,14 +140,14 @@ pub(crate) fn view(c: &CrosshairConfig) -> CrosshairValues {
     }
 }
 
-/// Where the shown crosshair stands relative to `autoexec.cfg`.
+/// Where the shown crosshair stands relative to the Steam settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Origin {
     /// Nothing read yet, or the file could not be read.
     Unknown,
-    /// `autoexec.cfg` has no crosshair block: the defaults are shown.
+    /// The settings have no crosshair yet: the defaults are shown.
     NoneSaved,
-    /// The shown crosshair is the one in `autoexec.cfg`.
+    /// The shown crosshair is the one in the settings.
     Saved,
 }
 
@@ -147,9 +155,9 @@ pub(crate) fn status_text(origin: Origin, dirty: bool) -> &'static str {
     match (dirty, origin) {
         (true, Origin::NoneSaved | Origin::Unknown) => "Not applied yet",
         (true, Origin::Saved) => "Changes not applied yet",
-        (false, Origin::Saved) => "Same as the crosshair in autoexec.cfg",
+        (false, Origin::Saved) => "Same as the crosshair in your Steam settings",
         (false, Origin::NoneSaved) => {
-            "No crosshair in autoexec.cfg yet; showing the game's default"
+            "No custom crosshair in your Steam settings yet; showing the game's default"
         }
         (false, Origin::Unknown) => "Showing the game's default",
     }
@@ -172,7 +180,8 @@ type Loaded = Result<(Option<CrosshairConfig>, bool), String>;
 fn load(deps: &Deps) -> Loaded {
     let paths = (deps.locate)().map_err(|e| game_error_text(&e))?;
     let running = (deps.running)();
-    crosshair::load(&paths)
+    let user_dir = (deps.user_dir)().map_err(|e| error_text(&e))?;
+    crosshair::load(&paths, &user_dir)
         .map(|c| (c, running))
         .map_err(|e| error_text(&e))
 }
@@ -183,7 +192,8 @@ fn write(deps: &Deps, c: &CrosshairConfig) -> Result<(), (String, bool)> {
     if (deps.running)() {
         return Err((GAME_RUNNING_TEXT.into(), true));
     }
-    crosshair::apply(&paths, c).map_err(|e| (error_text(&e), false))
+    let user_dir = (deps.user_dir)().map_err(|e| (error_text(&e), false))?;
+    crosshair::apply(&paths, &user_dir, c).map_err(|e| (error_text(&e), false))
 }
 
 fn spawn(name: &str, f: impl FnOnce() + Send + 'static) -> bool {
@@ -294,7 +304,7 @@ impl Crosshair {
         self.publish();
     }
 
-    /// Read the managed block, unless there are unapplied edits to keep.
+    /// Read the settings, unless there are unapplied edits to keep.
     fn load(&self) {
         let skip = self.weak.upgrade().is_none_or(|a| {
             let s = a.global::<CrosshairState>();
@@ -340,7 +350,7 @@ impl Crosshair {
             }
             Err(text) => {
                 self.origin.set(Origin::Unknown);
-                self.show_result("Couldn't read autoexec.cfg", &text, true);
+                self.show_result("Couldn't read your crosshair settings", &text, true);
             }
         }
         self.publish();
@@ -382,7 +392,8 @@ impl Crosshair {
                 self.with_state(|s| s.set_game_running(false));
                 self.show_result(
                     "Crosshair applied",
-                    "Written to autoexec.cfg. Deadlock uses it the next time it starts.",
+                    "Saved to your Steam crosshair settings. Deadlock uses it the next time \
+                     it starts, and you can still change it in game.",
                     false,
                 );
             }
@@ -454,15 +465,19 @@ mod tests {
     fn status_reads_plainly() {
         assert_eq!(
             status_text(Origin::Saved, false),
-            "Same as the crosshair in autoexec.cfg"
+            "Same as the crosshair in your Steam settings"
         );
         assert_eq!(status_text(Origin::Saved, true), "Changes not applied yet");
         assert_eq!(status_text(Origin::NoneSaved, true), "Not applied yet");
-        assert!(status_text(Origin::NoneSaved, false).starts_with("No crosshair"));
-        let e = CrosshairError::NotText("/g/autoexec.cfg".into());
+        assert!(status_text(Origin::NoneSaved, false).starts_with("No custom crosshair"));
+        let e = CrosshairError::NotText("/s/citadel_hero_settings.lst".into());
         assert_eq!(
             error_text(&e),
-            "/g/autoexec.cfg is not plain text, so Shiv left it unchanged."
+            "/s/citadel_hero_settings.lst is not plain text, so Shiv left it unchanged."
+        );
+        assert_eq!(
+            error_text(&CrosshairError::SteamNotFound),
+            "Steam was not found. Install Steam and sign in once, then try again."
         );
     }
 }
