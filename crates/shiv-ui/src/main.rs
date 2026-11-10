@@ -512,6 +512,7 @@ mod tests {
                     Ok(())
                 }),
                 running: Arc::new(|| false),
+                can_detect: true,
                 poll: Duration::from_millis(10),
                 timeout: Duration::from_secs(5),
             },
@@ -1099,6 +1100,7 @@ mod tests {
                     Ok(())
                 }),
                 running: Arc::new(move || game_seen.load(Ordering::SeqCst)),
+                can_detect: true,
                 poll: Duration::from_millis(10),
                 timeout: Duration::from_millis(1500),
             },
@@ -1268,6 +1270,50 @@ mod tests {
         );
         assert!(!state.get_running() && !state.get_waiting());
         assert_eq!(launches.load(Ordering::SeqCst), 6);
+
+        // Where the game process cannot be detected (no process scanning):
+        // the request is sent and that is all the status claims; no waiting,
+        // no timeout, and the process check is never consulted.
+        let sent = Arc::new(AtomicUsize::new(0));
+        let (sent_in, located) = (sent.clone(), paths.clone());
+        let app2 = App::new().expect("app");
+        launch::attach_with(
+            &app2,
+            launch::Deps {
+                locate: Arc::new(move || Ok(located.clone())),
+                check: Arc::new(shiv_core::health::check),
+                launch: Arc::new(move |_, _| {
+                    sent_in.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }),
+                running: Arc::new(|| panic!("process scanning is unavailable")),
+                can_detect: false,
+                poll: Duration::from_millis(10),
+                timeout: Duration::from_millis(200),
+            },
+        );
+        app2.show().expect("show");
+        let s2 = app2.global::<LaunchState>();
+        assert!(run_until(&app2, Duration::from_secs(20), |a| !a
+            .global::<LaunchState>()
+            .get_busy()));
+        s2.invoke_launch();
+        assert!(run_until(&app2, Duration::from_secs(20), |a| {
+            let s = a.global::<LaunchState>();
+            !s.get_busy() && s.get_status_text() != ""
+        }));
+        assert_eq!(s2.get_status_text().as_str(), launch::SENT_TEXT);
+        assert!(!s2.get_status_error() && !s2.get_waiting() && !s2.get_running());
+        assert_eq!(sent.load(Ordering::SeqCst), 1);
+        // Past the timeout nothing changes: no "could not confirm".
+        run_until(&app2, Duration::from_millis(400), |_| false);
+        assert_eq!(s2.get_status_text().as_str(), launch::SENT_TEXT);
+        // Launch stays available.
+        s2.invoke_launch();
+        let again = sent.clone();
+        assert!(run_until(&app2, Duration::from_secs(20), move |_| again
+            .load(Ordering::SeqCst)
+            == 2));
     }
 
     /// Installed screen against a temp addons dir (never the real one):

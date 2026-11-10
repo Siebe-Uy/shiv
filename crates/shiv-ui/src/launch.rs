@@ -44,6 +44,9 @@ pub(crate) struct Deps {
     pub launch: Launcher,
     /// Whether a Deadlock process exists.
     pub running: Running,
+    /// Whether `running` can know (process scanning exists on this
+    /// platform). Without it, Launch only sends the request.
+    pub can_detect: bool,
     /// How often the watcher looks for the game process.
     pub poll: Duration,
     /// How long after Launch the game process must appear.
@@ -57,6 +60,7 @@ impl Deps {
             check: Arc::new(health::check),
             launch: Arc::new(launch::launch_cancellable),
             running: Arc::new(shiv_core::game::is_running),
+            can_detect: shiv_core::game::can_detect(),
             poll: Duration::from_secs(1),
             // Steam may update the game or process shaders before it starts.
             timeout: Duration::from_secs(180),
@@ -68,7 +72,10 @@ pub(crate) const LAUNCHING_TEXT: &str = "Launching Deadlock\u{2026}";
 pub(crate) const RUNNING_TEXT: &str = "Deadlock is running.";
 pub(crate) const ALREADY_RUNNING_TEXT: &str = "Deadlock is already running.";
 pub(crate) const EXITED_TEXT: &str = "Deadlock closed.";
-pub(crate) const CANCELLED_TEXT: &str = "Stopped waiting for Deadlock. If Steam already received the launch request it can still start the game; Shiv cannot take that back, so close the game if it opens.";
+pub(crate) const CANCELLED_TEXT: &str = "Stopped waiting for Deadlock. If Steam already received the launch request it can still start the game; Shiv cannot take that back, so close the game if it opens. If Steam was still starting up, it may need a restart.";
+/// Where the game process cannot be detected: the request went to Steam and
+/// that is all Shiv can know.
+pub(crate) const SENT_TEXT: &str = "Launch request sent to Steam.";
 
 fn timed_out_text(timeout: Duration) -> String {
     let secs = timeout.as_secs();
@@ -84,6 +91,8 @@ fn timed_out_text(timeout: Duration) -> String {
 
 /// How a launch watch ended.
 enum WatchEnd {
+    /// The link was handed over; the process cannot be watched here.
+    Sent,
     Failed(String),
     TimedOut,
     Exited,
@@ -104,6 +113,7 @@ fn watch_game(
         match (deps.launch)(paths, cancel) {
             Err(LaunchError::Cancelled) => return WatchEnd::Cancelled,
             Err(e) => return WatchEnd::Failed(format!("Could not launch Deadlock: {e}.")),
+            Ok(()) if !deps.can_detect => return WatchEnd::Sent,
             Ok(()) => {}
         }
         loop {
@@ -400,6 +410,7 @@ impl Launch {
             s.set_running(false);
         });
         match end {
+            WatchEnd::Sent => self.finish(Ok(SENT_TEXT.into())),
             WatchEnd::Failed(text) => self.finish(Err(text)),
             WatchEnd::TimedOut => self.finish(Err(timed_out_text(self.deps.timeout))),
             WatchEnd::Exited => {
@@ -467,7 +478,7 @@ impl Launch {
                         // A repair package built for other mods or another
                         // game build keeps loading until it is rebuilt or removed.
                         let stale = shiv_repair::overlay_state(&paths) == OverlayState::Stale;
-                        let running = (deps.running)();
+                        let running = deps.can_detect && (deps.running)();
                         ((deps.check)(&paths), stale, paths, running)
                     })
                     .map_err(|e| game_error_text(&e))

@@ -92,7 +92,9 @@ updater complexity, telemetry, i18n at launch.
   block permanently. Edits to `addons` are refused while the game runs.
   After the link is opened the status says Launching until a Deadlock
   process appears, then Running until it exits; with no process after a
-  timeout it says the launch could not be confirmed. Cancel launch stops
+  timeout it says the launch could not be confirmed. Where the game process
+  cannot be detected (process scanning is Linux-only), it only says the
+  launch request was sent. Cancel launch stops
   waiting and stops the URI opener if it still runs; a launch Steam already
   accepted cannot be taken back, and the status says so.
 - **Browse:** search, sort, category filter, pagination, thumbnails, and

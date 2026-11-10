@@ -87,6 +87,12 @@ pub fn any_deadlock_process<'a>(names: impl Iterator<Item = &'a str>) -> bool {
         .any(|n| n.eq_ignore_ascii_case("deadlock.exe") || n.eq_ignore_ascii_case("deadlock"))
 }
 
+/// Whether [`is_running`] can tell: false where process scanning is not
+/// implemented, so `is_running` always says "not running" there.
+pub fn can_detect() -> bool {
+    platform::CAN_SCAN_PROCESSES
+}
+
 /// True while a Deadlock process is running.
 pub fn is_running() -> bool {
     let names = platform::process_names();
@@ -119,6 +125,11 @@ mod tests {
             &[PathBuf::from("/nonexistent")],
         );
         assert!(matches!(none, Err(GameError::NotFound)));
+    }
+
+    #[test]
+    fn detection_is_available_only_where_processes_are_scanned() {
+        assert_eq!(can_detect(), cfg!(target_os = "linux"));
     }
 
     #[test]

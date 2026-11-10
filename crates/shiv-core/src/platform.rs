@@ -36,6 +36,9 @@ pub fn process_names() -> Vec<String> {
     names
 }
 
+/// Whether [`process_names`] can see running processes on this platform.
+pub const CAN_SCAN_PROCESSES: bool = cfg!(target_os = "linux");
+
 /// Process scanning is only implemented on Linux; other platforms report no processes.
 #[cfg(not(target_os = "linux"))]
 pub fn process_names() -> Vec<String> {
