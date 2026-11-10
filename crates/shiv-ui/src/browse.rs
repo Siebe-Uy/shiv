@@ -292,6 +292,9 @@ struct ModList {
     /// refused until the previous worker has really stopped.
     in_flight: RefCell<HashMap<String, u64>>,
     installed: RefCell<HashSet<String>>,
+    /// Installs finished since the last re-read of `installed` started, so a
+    /// read that began before them does not drop their badge.
+    installed_since: RefCell<HashSet<String>>,
     cache: Arc<thumbs::Cache>,
     loader: ThumbLoader,
     notify: ModelNotify,
@@ -483,6 +486,13 @@ fn installed_ids() -> HashSet<String> {
         .collect()
 }
 
+/// Re-read which mods are installed, so Install comes back after an
+/// uninstall elsewhere: called when Browse is shown and after Installed's
+/// toggles and uninstalls.
+pub(crate) fn refresh_installed() {
+    with_browse(|b| b.refresh_installed());
+}
+
 // ---------------------------------------------------------------------------
 // Controller
 
@@ -494,6 +504,7 @@ pub struct Browse {
     categories: RefCell<Vec<String>>,
     query: RefCell<ModQuery>,
     load_generation: Cell<u64>,
+    installed_generation: Cell<u64>,
     next_job: Cell<u64>,
     search_timer: Timer,
     this: RefCell<RcWeak<Browse>>,
@@ -508,6 +519,7 @@ pub fn attach(app: &App, api_url: &str) -> Arc<thumbs::Cache> {
         jobs: RefCell::new(HashMap::new()),
         in_flight: RefCell::new(HashMap::new()),
         installed: RefCell::new(HashSet::new()),
+        installed_since: RefCell::new(HashSet::new()),
         loader: ThumbLoader::start(cache.clone(), weak.clone()),
         cache: cache.clone(),
         notify: ModelNotify::default(),
@@ -523,6 +535,7 @@ pub fn attach(app: &App, api_url: &str) -> Arc<thumbs::Cache> {
             ..ModQuery::default()
         }),
         load_generation: Cell::new(0),
+        installed_generation: Cell::new(0),
         next_job: Cell::new(0),
         search_timer: Timer::default(),
         this: RefCell::new(RcWeak::new()),
@@ -546,6 +559,7 @@ pub fn attach(app: &App, api_url: &str) -> Arc<thumbs::Cache> {
     state.on_install(|id| with_browse(|b| b.install(id.as_str())));
     state.on_cancel(|id| with_browse(|b| b.cancel(id.as_str())));
     state.on_dismiss_banner(handle(|b| b.set_banner("")));
+    state.on_shown(refresh_installed);
 
     browse.load();
     cache
@@ -588,6 +602,46 @@ impl Browse {
         );
         if !started {
             self.fail_load("Could not start a background thread.".into());
+        }
+    }
+
+    fn refresh_installed(&self) {
+        if self.weak.upgrade().is_none() {
+            return;
+        }
+        let generation = self.installed_generation.get() + 1;
+        self.installed_generation.set(generation);
+        self.list.installed_since.borrow_mut().clear();
+        let weak = self.weak.clone();
+        crate::spawn_worker("shiv-installed-ids", installed_ids, move |result| {
+            // A failed read keeps the badges as they are.
+            if let Ok(ids) = result {
+                let _ = weak.upgrade_in_event_loop(move |_| {
+                    with_browse(|b| b.installed_read(generation, ids));
+                });
+            }
+        });
+    }
+
+    fn installed_read(&self, generation: u64, mut ids: HashSet<String>) {
+        if generation != self.installed_generation.get() {
+            return;
+        }
+        ids.extend(self.list.installed_since.borrow_mut().drain());
+        let old = std::mem::replace(&mut *self.list.installed.borrow_mut(), ids);
+        let changed: Vec<usize> = {
+            let now = self.list.installed.borrow();
+            self.list
+                .entries
+                .borrow()
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| old.contains(&e.id) != now.contains(&e.id))
+                .map(|(i, _)| i)
+                .collect()
+        };
+        for i in changed {
+            self.list.notify.row_changed(i);
         }
     }
 
@@ -778,6 +832,7 @@ impl Browse {
             // A finished install is a fact about the disk even if the job was cancelled late.
             if result.is_ok() {
                 self.list.installed.borrow_mut().insert(id.to_owned());
+                self.list.installed_since.borrow_mut().insert(id.to_owned());
             }
         }
         let current = self
@@ -844,6 +899,17 @@ pub(crate) mod test_hooks {
                     text: "50%".into(),
                 },
             );
+        });
+    }
+
+    /// What a re-read of the installed mods delivers: `stale` is a read
+    /// superseded by a newer one.
+    pub fn installed_read(ids: &[&str], stale: bool) {
+        with_browse(|b| {
+            let generation = b.installed_generation.get() + 1;
+            b.installed_generation.set(generation);
+            let delivered = if stale { generation - 1 } else { generation };
+            b.installed_read(delivered, ids.iter().map(|s| (*s).to_owned()).collect());
         });
     }
 

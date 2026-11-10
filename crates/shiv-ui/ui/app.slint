@@ -78,6 +78,9 @@ export component App inherits Window {
 
     // Re-read the addons folder whenever the Installed screen is shown.
     changed screen => {
+        if (root.screen == 0) {
+            BrowseState.shown();
+        }
         if (root.screen == 1) {
             InstalledState.refresh();
         }

@@ -42,6 +42,8 @@ export global BrowseState {
     callback install(string);
     callback cancel(string);
     callback dismiss-banner();
+    // The screen was shown: re-read which mods are installed.
+    callback shown();
 }
 
 component ModRowView inherits Rectangle {
