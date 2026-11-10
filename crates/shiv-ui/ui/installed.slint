@@ -25,8 +25,10 @@ export global InstalledState {
     in property <string> summary;
     // Deadlock is running: toggling and uninstalling are refused.
     in property <bool> game-running;
-    // An action is in flight on a worker thread.
+    // A re-read or an action is in flight on a worker thread.
     in property <bool> busy;
+    // The repair package no longer matches the mods but still loads.
+    in property <bool> repair-stale;
     // Row waiting for uninstall confirmation, "" when none.
     in-out property <string> confirm-id;
 
@@ -34,6 +36,8 @@ export global InstalledState {
     callback toggle(string);
     callback uninstall(string);
     callback dismiss-banner();
+    // Show the Repair screen.
+    callback open-repair();
 }
 
 component InstalledRowView inherits Rectangle {
@@ -201,6 +205,30 @@ export component InstalledPage inherits Rectangle {
                     font-size: Theme.text-md;
                     vertical-alignment: center;
                     wrap: word-wrap;
+                }
+            }
+        }
+
+        if InstalledState.repair-stale: Rectangle {
+            border-radius: Theme.radius;
+            border-width: 1px;
+            border-color: Theme.accent;
+            background: Theme.raised;
+            HorizontalLayout {
+                padding-left: Theme.s2;
+                padding-right: Theme.s1;
+                spacing: Theme.s2;
+                Text {
+                    text: "Repair package out of date: your mods changed since the last repair, but the old repair package still loads and may patch files that changed or are gone. Re-apply or remove it on the Repair screen.";
+                    color: Theme.text;
+                    font-size: Theme.text-md;
+                    vertical-alignment: center;
+                    wrap: word-wrap;
+                    horizontal-stretch: 1;
+                }
+                TextButton {
+                    text: "Open Repair";
+                    clicked => { InstalledState.open-repair(); }
                 }
             }
         }

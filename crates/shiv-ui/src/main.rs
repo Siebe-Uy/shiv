@@ -84,6 +84,14 @@ pub(crate) fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
     )
 }
 
+/// Show the Repair screen (from a stale-package notice elsewhere).
+pub(crate) fn open_repair(app: &App) {
+    app.set_screen(4);
+    // `changed screen` also asks for a check; a second request while the
+    // first runs is dropped, so this costs nothing when both fire.
+    app.global::<RepairState>().invoke_shown();
+}
+
 fn main() -> Result<(), slint::PlatformError> {
     tune_allocator();
     let app = App::new()?;
@@ -481,6 +489,81 @@ mod tests {
         );
         assert_eq!(state.get_apply_label().as_str(), "Re-apply repairs");
         assert!(state.get_can_apply());
+        assert!(state.get_has_package());
+
+        // The stale package is flagged outside Repair too: on Installed and
+        // in the Launch review, each with a way to the Repair screen.
+        let launches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (counter, located) = (launches.clone(), paths.clone());
+        launch::attach_with(
+            &app,
+            launch::Deps {
+                locate: Arc::new(move || Ok(located.clone())),
+                check: Arc::new(shiv_core::health::check),
+                launch: Arc::new(move |_| {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }),
+            },
+        );
+        let located = paths.clone();
+        installed::attach_with(
+            &app,
+            Arc::new(thumbs::Cache::with_fetcher(1 << 20, |_| None)),
+            installed::Deps {
+                locate: Arc::new(move || Ok(located.clone())),
+                running: Arc::new(|| false),
+            },
+        );
+        app.set_screen(1);
+        assert!(run_until(&app, Duration::from_secs(20), |a| {
+            let s = a.global::<InstalledState>();
+            s.get_load_state() == LoadState::Ready && !s.get_busy() && s.get_repair_stale()
+        }));
+        click(&app, "Open Repair");
+        assert_eq!(app.get_screen(), 4);
+        assert!(run_until(&app, Duration::from_secs(60), idle));
+        let launch = app.global::<LaunchState>();
+        assert!(run_until(&app, Duration::from_secs(20), |a| {
+            let s = a.global::<LaunchState>();
+            !s.get_busy() && s.get_repair_stale()
+        }));
+        assert_eq!(launch.get_problems_short().as_str(), "1 problem");
+        // Launch stops at the review instead of launching with it.
+        launch.invoke_launch();
+        assert!(run_until(&app, Duration::from_secs(20), |a| a
+            .global::<LaunchState>()
+            .get_dialog_open()));
+        assert_eq!(launches.load(Ordering::SeqCst), 0);
+        launch.invoke_open_repair();
+        assert!(!launch.get_dialog_open());
+        assert_eq!(app.get_screen(), 4);
+        assert!(run_until(&app, Duration::from_secs(60), idle));
+
+        // Remove repair package: asks, unmounts and deletes, independent of
+        // Undo; gameinfo.gi is as before any repair.
+        click(&app, "Remove repair package");
+        assert_eq!(state.get_confirm(), 3);
+        click(&app, "Remove package");
+        assert!(run_until(&app, Duration::from_secs(60), move |a| idle(a)
+            && a.global::<RepairState>().get_result_title()
+                == "Removed the repair package"));
+        assert!(!state.get_result_error());
+        assert!(!overlay.exists());
+        assert!(!paths.root.join("game/citadel/shiv_repair").exists());
+        assert_eq!(std::fs::read(&paths.gameinfo).expect("gameinfo"), gameinfo);
+        assert_eq!(std::fs::read(&mod_vpk).expect("mod"), mod_bytes);
+        assert!(!state.get_has_package() && !state.get_stale());
+        assert!(state.get_can_undo());
+        assert!(run_until(&app, Duration::from_secs(20), |a| {
+            let s = a.global::<LaunchState>();
+            !s.get_busy() && !s.get_repair_stale()
+        }));
+        app.global::<InstalledState>().invoke_refresh();
+        assert!(run_until(&app, Duration::from_secs(20), |a| {
+            let s = a.global::<InstalledState>();
+            !s.get_busy() && !s.get_repair_stale()
+        }));
     }
 
     /// Crosshair against a temp install and a temp Steam userdata folder
@@ -1091,6 +1174,9 @@ mod tests {
         // When set, the next game-running check panics on its worker.
         let boom = Arc::new(AtomicBool::new(false));
         let boom_in = boom.clone();
+        // While set, an action's worker waits (refreshes do not).
+        let hold = Arc::new(AtomicBool::new(false));
+        let hold_in = hold.clone();
         let deps = installed::Deps {
             locate: Arc::new(move || {
                 while gate_in.load(Ordering::Relaxed) {
@@ -1100,6 +1186,11 @@ mod tests {
             }),
             running: Arc::new(move || {
                 assert!(!boom_in.swap(false, Ordering::Relaxed), "test worker panic");
+                while hold_in.load(Ordering::Relaxed)
+                    && std::thread::current().name() == Some("shiv-installed-action")
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
                 flag.load(Ordering::Relaxed)
             }),
         };
@@ -1198,6 +1289,28 @@ mod tests {
         assert!(exists("pak01_dir.vpk"));
         assert_eq!(enabled(&app, 0), Some(true));
         click(&app, "Dismiss");
+
+        // A Refresh that finishes while an action still runs does not clear
+        // busy: a second toggle cannot start beside the first.
+        hold.store(true, Ordering::Relaxed);
+        state.invoke_toggle("m1".into());
+        assert!(state.get_busy());
+        state.invoke_refresh();
+        run_until(&app, Duration::from_millis(500), |_| false);
+        assert!(state.get_busy(), "the action is still running");
+        state.invoke_toggle("m1".into()); // ignored: an action runs
+        hold.store(false, Ordering::Relaxed);
+        assert!(run_until(&app, Duration::from_secs(20), |a| {
+            let s = a.global::<InstalledState>();
+            !s.get_busy() && s.get_rows().row_data(0).is_some_and(|r| !r.enabled)
+        }));
+        run_until(&app, Duration::from_millis(300), |_| false);
+        assert!(exists("pak01_dir.vpk.disabled") && !exists("pak01_dir.vpk"));
+        state.invoke_toggle("m1".into());
+        assert!(run_until(&app, Duration::from_secs(20), |a| {
+            let s = a.global::<InstalledState>();
+            !s.get_busy() && s.get_rows().row_data(0).is_some_and(|r| r.enabled)
+        }));
 
         // Game running: refresh picks it up; actions are refused with an explanation.
         running.store(true, Ordering::Relaxed);
@@ -1347,9 +1460,18 @@ mod tests {
         };
         assert_eq!(row_state(&app), Some(InstallState::Idle));
 
+        // The Installed badge follows re-reads of the addons folder (Browse
+        // shown, or an uninstall on Installed); a superseded read is ignored.
+        use browse::test_hooks as hooks;
+        hooks::installed_read(&["m1"], false);
+        assert_eq!(row_state(&app), Some(InstallState::Installed));
+        hooks::installed_read(&[], true);
+        assert_eq!(row_state(&app), Some(InstallState::Installed));
+        hooks::installed_read(&[], false);
+        assert_eq!(row_state(&app), Some(InstallState::Idle));
+
         // Deterministic: worker posts are only applied while the event loop
         // runs, so nothing below races with the real worker.
-        use browse::test_hooks as hooks;
         state.invoke_install("m1".into());
         assert_eq!(row_state(&app), Some(InstallState::Downloading));
         let first = hooks::job_generation("m1").expect("job");

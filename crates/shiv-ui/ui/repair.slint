@@ -44,11 +44,13 @@ export global RepairState {
     in property <string> apply-label;
     in property <string> confirm-apply-title;
     in property <bool> can-undo;
+    // A repair package is on disk or mounted by gameinfo.gi.
+    in property <bool> has-package;
     // Outcome of the last apply or undo; "" when none.
     in property <string> result-title;
     in property <[string]> result-lines;
     in property <bool> result-error;
-    // 0: no dialog, 1: confirm apply, 2: confirm undo.
+    // 0: no dialog, 1: confirm apply, 2: confirm undo, 3: confirm removing the package.
     in-out property <int> confirm;
 
     // The screen was shown.
@@ -56,6 +58,7 @@ export global RepairState {
     callback rescan();
     callback apply();
     callback undo();
+    callback remove-package();
     callback dismiss-result();
 }
 
@@ -216,6 +219,12 @@ export component RepairPage inherits Rectangle {
             }
             TextButton {
                 y: (parent.height - self.height) / 2;
+                text: "Remove repair package";
+                disabled: !RepairState.has-package || root.locked;
+                clicked => { RepairState.confirm = 3; }
+            }
+            TextButton {
+                y: (parent.height - self.height) / 2;
                 text: "Undo last repair";
                 disabled: !RepairState.can-undo || root.locked;
                 clicked => { RepairState.confirm = 2; }
@@ -249,7 +258,7 @@ export component RepairPage inherits Rectangle {
 
         if RepairState.stale && !RepairState.game-running: Notice {
             strong: true;
-            text: "Needs re-apply: your mods or the game changed since the last repair, so the repair package is out of date. Apply again to rebuild it, or undo it.";
+            text: "Needs re-apply: your mods or the game changed since the last repair, so the repair package is out of date. Apply again to rebuild it, or remove the repair package.";
         }
 
         if RepairState.result-title != "": Rectangle {
@@ -327,9 +336,10 @@ export component RepairPage inherits Rectangle {
     }
 }
 
-// Confirmation for Apply and Undo, modal over the whole window.
+// Confirmation for Apply, Undo and Remove, modal over the whole window.
 export component RepairDialog inherits Rectangle {
     property <bool> undo: RepairState.confirm == 2;
+    property <bool> remove: RepairState.confirm == 3;
     background: Theme.bg-sunken.with-alpha(0.75);
 
     TouchArea { }
@@ -363,14 +373,17 @@ export component RepairDialog inherits Rectangle {
             spacing: Theme.s2;
 
             Text {
-                text: root.undo ? "Undo the last repair?" : RepairState.confirm-apply-title;
+                text: root.remove ? "Remove the repair package?"
+                    : root.undo ? "Undo the last repair?" : RepairState.confirm-apply-title;
                 color: Theme.text;
                 font-size: Theme.text-xl;
                 font-weight: 600;
                 wrap: word-wrap;
             }
             Text {
-                text: root.undo
+                text: root.remove
+                    ? "Shiv backs up the repair package, then deletes game/citadel/shiv_repair and removes only its line from gameinfo.gi. Mods load without repairs again. Undo last repair puts it back. Your mod files are not touched."
+                    : root.undo
                     ? "Shiv puts the repair package back the way it was before the last repair, from the backup it made then, and undoes only its own line in gameinfo.gi. Other changes to gameinfo.gi (Performance settings, game updates) stay. Your mod files are not touched."
                     : "Shiv first backs up the files it replaces, so you can undo this. It then writes a repair package to game/citadel/shiv_repair and adds it to gameinfo.gi. Your mod files are not modified.";
                 color: Theme.text-muted;
@@ -385,10 +398,12 @@ export component RepairDialog inherits Rectangle {
                     clicked => { RepairState.confirm = 0; }
                 }
                 Button {
-                    text: root.undo ? "Undo repair" : "Apply repair";
+                    text: root.remove ? "Remove package" : root.undo ? "Undo repair" : "Apply repair";
                     primary: true;
                     clicked => {
-                        if (root.undo) {
+                        if (root.remove) {
+                            RepairState.remove-package();
+                        } else if (root.undo) {
                             RepairState.undo();
                         } else {
                             RepairState.apply();

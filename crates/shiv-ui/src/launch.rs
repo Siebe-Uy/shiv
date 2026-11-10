@@ -14,6 +14,7 @@ use std::sync::Arc;
 use shiv_core::game::GamePaths;
 use shiv_core::health::{self, Finding, FindingKind};
 use shiv_core::launch::{self, LaunchError};
+use shiv_repair::OverlayState;
 use slint::{ComponentHandle, Model as _, ModelRc, VecModel, Weak};
 
 use crate::browse::game_error_text;
@@ -115,15 +116,16 @@ enum Purpose {
     Launch,
     /// Launch anyway on findings the user saw earlier (via Review): launch
     /// only if the disk still shows exactly those, otherwise show the new ones.
-    Confirm(Vec<Finding>),
+    Confirm(Vec<Finding>, bool),
 }
 
 struct Launch {
     weak: Weak<App>,
     deps: Deps,
     rows: Rc<VecModel<FindingRow>>,
-    /// Result of the last check: where it ran and what it found.
-    last: RefCell<Option<(GamePaths, Vec<Finding>)>>,
+    /// Result of the last check: where it ran, what it found, and whether
+    /// the repair package is out of date.
+    last: RefCell<Option<(GamePaths, Vec<Finding>, bool)>>,
     /// The open dialog shows the result of the check that the Launch click
     /// itself ran, so Launch anyway needs no re-check.
     fresh_dialog: Cell<bool>,
@@ -157,13 +159,25 @@ pub(crate) fn attach_with(app: &App, deps: Deps) {
     state.on_cancel(|| with_launch(|l| l.with_state(|s| s.set_dialog_open(false))));
     state.on_review(|| {
         with_launch(|l| {
-            if l.rows.row_count() > 0 {
+            if l.rows.row_count() > 0
+                || l.weak
+                    .upgrade()
+                    .is_some_and(|a| a.global::<LaunchState>().get_repair_stale())
+            {
                 l.fresh_dialog.set(false);
                 l.with_state(|s| s.set_dialog_open(true));
             }
         });
     });
     state.on_refresh(refresh);
+    state.on_open_repair(|| {
+        with_launch(|l| {
+            l.with_state(|s| s.set_dialog_open(false));
+            if let Some(app) = l.weak.upgrade() {
+                crate::open_repair(&app);
+            }
+        });
+    });
     with_launch(|l| l.check(Purpose::Background));
 }
 
@@ -225,7 +239,12 @@ impl Launch {
             "shiv-health",
             move || {
                 (deps.locate)()
-                    .map(|paths| ((deps.check)(&paths), paths))
+                    .map(|paths| {
+                        // A repair package built for other mods or another
+                        // game build keeps loading until it is rebuilt or removed.
+                        let stale = shiv_repair::overlay_state(&paths) == OverlayState::Stale;
+                        ((deps.check)(&paths), stale, paths)
+                    })
                     .map_err(|e| game_error_text(&e))
             },
             move |result| {
@@ -245,46 +264,49 @@ impl Launch {
         &self,
         generation: u64,
         purpose: Purpose,
-        result: Result<(Vec<Finding>, GamePaths), String>,
+        result: Result<(Vec<Finding>, bool, GamePaths), String>,
     ) {
         if generation != self.generation.get() {
             return;
         }
-        let (findings, paths) = match result {
+        let (findings, stale, paths) = match result {
             Ok(r) => r,
             Err(text) => {
                 self.rows.set_vec(Vec::new());
                 *self.last.borrow_mut() = None;
+                self.with_state(|s| s.set_repair_stale(false));
                 self.status_from_check.set(true);
                 return self.finish(Err(text));
             }
         };
         self.rows.set_vec(rows(&findings, &paths));
+        let problems = findings.len() + usize::from(stale);
         self.with_state(|s| {
             s.set_busy(false);
-            s.set_problems_text(problems_text(findings.len()).into());
-            s.set_problems_short(problems_short(findings.len()).into());
+            s.set_repair_stale(stale);
+            s.set_problems_text(problems_text(problems).into());
+            s.set_problems_short(problems_short(problems).into());
             if self.status_from_check.replace(false) {
                 s.set_status_text("".into());
                 s.set_status_error(false);
             }
         });
-        *self.last.borrow_mut() = Some((paths.clone(), findings.clone()));
+        *self.last.borrow_mut() = Some((paths.clone(), findings.clone(), stale));
         let launch_now = match &purpose {
             Purpose::Background => {
                 // Debug builds only: open the review dialog for startup findings
                 // (for screenshots); it never launches anything.
                 #[cfg(debug_assertions)]
-                if !findings.is_empty()
-                    && std::env::var_os("SHIV_REVIEW").is_some_and(|v| !v.is_empty())
-                {
+                if problems > 0 && std::env::var_os("SHIV_REVIEW").is_some_and(|v| !v.is_empty()) {
                     self.fresh_dialog.set(false);
                     self.with_state(|s| s.set_dialog_open(true));
                 }
                 return;
             }
-            Purpose::Launch => findings.is_empty(),
-            Purpose::Confirm(seen) => findings.is_empty() || *seen == findings,
+            Purpose::Launch => problems == 0,
+            Purpose::Confirm(seen, seen_stale) => {
+                problems == 0 || (*seen == findings && *seen_stale == stale)
+            }
         };
         if launch_now {
             self.start_launch(paths);
@@ -300,14 +322,14 @@ impl Launch {
             return;
         }
         let last = self.last.borrow().clone();
-        let Some((paths, findings)) = last else {
+        let Some((paths, findings, stale)) = last else {
             return;
         };
         if self.fresh_dialog.get() {
             self.start_launch(paths);
         } else {
             // Opened via Review: those findings may be stale.
-            self.check(Purpose::Confirm(findings));
+            self.check(Purpose::Confirm(findings, stale));
         }
     }
 

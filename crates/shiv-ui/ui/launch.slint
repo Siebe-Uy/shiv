@@ -23,6 +23,8 @@ export global LaunchState {
     // Result of the last launch or a failed check; "" when none.
     in property <string> status-text;
     in property <bool> status-error;
+    // The repair package no longer matches the installed mods or game.
+    in property <bool> repair-stale;
     in-out property <bool> dialog-open;
 
     callback launch();
@@ -31,13 +33,15 @@ export global LaunchState {
     callback review();
     // Re-check quietly (screen change).
     callback refresh();
+    // Show the Repair screen.
+    callback open-repair();
 }
 
 // Bottom of the sidebar.
 export component LaunchPanel inherits VerticalLayout {
     spacing: Theme.s1;
 
-    if LaunchState.findings.length > 0 && !LaunchState.busy: HorizontalLayout {
+    if (LaunchState.findings.length > 0 || LaunchState.repair-stale) && !LaunchState.busy: HorizontalLayout {
         spacing: Theme.s1;
         Rectangle {
             width: 6px;
@@ -162,7 +166,40 @@ export component LaunchDialog inherits Rectangle {
                 }
             }
 
-            Rectangle {
+            if LaunchState.repair-stale: Rectangle {
+                border-radius: Theme.radius;
+                border-width: 1px;
+                border-color: Theme.accent;
+                background: Theme.bg;
+                HorizontalLayout {
+                    padding: Theme.s1;
+                    padding-left: Theme.s2;
+                    spacing: Theme.s2;
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 2px;
+                        Text {
+                            text: "Repair package out of date";
+                            color: Theme.text;
+                            font-size: Theme.text-md;
+                            font-weight: 600;
+                        }
+                        Text {
+                            text: "Your mods or the game changed since the last repair, but the old repair package still loads and may patch files that changed or are gone. Re-apply or remove it on the Repair screen.";
+                            color: Theme.text-muted;
+                            font-size: Theme.text-sm;
+                            wrap: word-wrap;
+                        }
+                    }
+                    TextButton {
+                        y: (parent.height - self.height) / 2;
+                        text: "Open Repair";
+                        clicked => { LaunchState.open-repair(); }
+                    }
+                }
+            }
+
+            if LaunchState.findings.length > 0: Rectangle {
                 height: min(LaunchState.findings.length * 72px, 288px);
                 border-width: 1px;
                 border-color: Theme.border;

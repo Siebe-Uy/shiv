@@ -16,6 +16,7 @@ use shiv_core::addons::{self, AddonsError};
 use shiv_core::game::{self, GameError, GamePaths};
 use shiv_core::install::{self, InstallError};
 use shiv_core::sidecar::{self, InstalledMod};
+use shiv_repair::OverlayState;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel, Weak};
 
 use crate::browse::{game_error_text, install_error_text, to_slint};
@@ -153,6 +154,9 @@ fn summary(n: usize) -> String {
 struct Loaded {
     mods: Vec<InstalledMod>,
     running: bool,
+    /// The repair package no longer matches the mods (after a toggle or an
+    /// uninstall, say) but still loads.
+    repair_stale: bool,
 }
 
 /// `addons::list` runs first: `sidecar::group` swallows an unreadable folder
@@ -163,6 +167,7 @@ fn load(deps: &Deps) -> Result<Loaded, String> {
     Ok(Loaded {
         mods: sidecar::group(&paths.addons),
         running: (deps.running)(),
+        repair_stale: shiv_repair::overlay_state(&paths) == OverlayState::Stale,
     })
 }
 
@@ -227,6 +232,11 @@ struct Installed {
     mods: RefCell<Vec<InstalledMod>>,
     entries: RefCell<Vec<Entry>>,
     generation: Cell<u64>,
+    /// A re-read of the folder is running.
+    refreshing: Cell<bool>,
+    /// A toggle or uninstall is running. Separate from `refreshing`: a
+    /// Refresh finishing mid-action must not let a second action start.
+    acting: Cell<bool>,
 }
 
 /// Wire the Installed screen to `app` using the real game location.
@@ -244,6 +254,8 @@ pub(crate) fn attach_with(app: &App, cache: Arc<thumbs::Cache>, deps: Deps) {
         mods: RefCell::new(Vec::new()),
         entries: RefCell::new(Vec::new()),
         generation: Cell::new(0),
+        refreshing: Cell::new(false),
+        acting: Cell::new(false),
     });
     INSTALLED.with(|c| *c.borrow_mut() = Some(controller));
     let state = app.global::<InstalledState>();
@@ -251,6 +263,13 @@ pub(crate) fn attach_with(app: &App, cache: Arc<thumbs::Cache>, deps: Deps) {
     state.on_refresh(|| with_installed(|i| i.refresh(true)));
     state.on_toggle(|id| with_installed(|i| i.toggle(id.as_str())));
     state.on_uninstall(|id| with_installed(|i| i.act(id.as_str(), Action::Uninstall)));
+    state.on_open_repair(|| {
+        with_installed(|i| {
+            if let Some(app) = i.weak.upgrade() {
+                crate::open_repair(&app);
+            }
+        });
+    });
     state.on_dismiss_banner(|| {
         with_installed(|i| i.with_state(|s| s.set_banner_text("".into())));
     });
@@ -261,6 +280,18 @@ impl Installed {
         if let Some(app) = self.weak.upgrade() {
             f(&app.global::<InstalledState>());
         }
+    }
+
+    /// `busy` in the UI: a re-read or an action is running.
+    fn set_flags(&self, refreshing: Option<bool>, acting: Option<bool>) {
+        if let Some(r) = refreshing {
+            self.refreshing.set(r);
+        }
+        if let Some(a) = acting {
+            self.acting.set(a);
+        }
+        let busy = self.refreshing.get() || self.acting.get();
+        self.with_state(|s| s.set_busy(busy));
     }
 
     fn build_row(&self, e: &Entry) -> InstalledRow {
@@ -294,14 +325,14 @@ impl Installed {
             if user {
                 s.set_banner_text("".into());
             }
-            // Busy until the result for this generation arrives: actions are
-            // dropped while the entries may be stale.
-            s.set_busy(true);
             // Keep a loaded list on screen while it is re-read.
             if s.get_load_state() != LoadState::Ready {
                 s.set_load_state(LoadState::Loading);
             }
         });
+        // Busy until the result for this generation arrives: actions are
+        // dropped while the entries may be stale.
+        self.set_flags(Some(true), None);
         let deps = self.deps.clone();
         let weak = self.weak.clone();
         let started = crate::spawn_worker(
@@ -320,8 +351,8 @@ impl Installed {
     }
 
     fn fail(&self, text: String) {
+        self.set_flags(Some(false), None);
         self.with_state(|s| {
-            s.set_busy(false);
             s.set_error_text(text.into());
             s.set_load_state(LoadState::Failed);
         });
@@ -338,9 +369,10 @@ impl Installed {
         let list = entries(&loaded.mods);
         self.rows
             .set_vec(list.iter().map(|e| self.build_row(e)).collect::<Vec<_>>());
+        self.set_flags(Some(false), None);
         self.with_state(|s| {
-            s.set_busy(false);
             s.set_game_running(loaded.running);
+            s.set_repair_stale(loaded.repair_stale);
             s.set_summary(summary(list.len()).into());
             s.set_load_state(LoadState::Ready);
             let pending = s.get_confirm_id();
@@ -405,11 +437,7 @@ impl Installed {
     }
 
     fn act(&self, id: &str, action: Action) {
-        let busy = self
-            .weak
-            .upgrade()
-            .is_none_or(|a| a.global::<InstalledState>().get_busy());
-        if busy {
+        if self.weak.upgrade().is_none() || self.refreshing.get() || self.acting.get() {
             return;
         }
         let found = {
@@ -423,11 +451,9 @@ impl Installed {
         let Some((m, name)) = found else {
             return;
         };
-        self.with_state(|s| {
-            s.set_busy(true);
-            // The confirmation is consumed only once the action is accepted.
-            s.set_confirm_id(SharedString::new());
-        });
+        self.set_flags(None, Some(true));
+        // The confirmation is consumed only once the action is accepted.
+        self.with_state(|s| s.set_confirm_id(SharedString::new()));
         let deps = self.deps.clone();
         let weak = self.weak.clone();
         let started = crate::spawn_worker(
@@ -448,15 +474,19 @@ impl Installed {
     /// Success or failure, re-read the folder: that also refreshes the
     /// game-running state (a game-running refusal means it just started).
     fn acted(&self, result: Result<(), String>) {
-        // The disk changed: keep the Launch sidebar count current.
+        // The disk changed: keep the Launch sidebar count and Browse's
+        // Installed badges current.
         crate::launch::refresh();
-        // `busy` stays set; the refresh below clears it when the list is current.
+        crate::browse::refresh_installed();
         self.with_state(|s| {
             if let Err(text) = &result {
                 s.set_banner_text(text.as_str().into());
             }
         });
+        // The refresh marks busy before the action flag clears, so `busy`
+        // stays set until the list is current.
         self.refresh(false);
+        self.set_flags(None, Some(false));
     }
 }
 

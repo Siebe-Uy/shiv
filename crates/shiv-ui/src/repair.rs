@@ -1,5 +1,6 @@
 //! Repair screen controller: checks installed mods with `shiv_repair::analyze`,
-//! previews what a repair changes, applies it and undoes the last one.
+//! previews what a repair changes, applies it, undoes the last one and removes
+//! the repair package.
 //!
 //! Threading matches `installed`: `analyze` is slow on a real install (it
 //! opens every game VPK and runs the engine per mod), so it and every write run
@@ -244,6 +245,21 @@ pub(crate) fn undo_result(report: &shiv_repair::RestoreReport) -> (String, Vec<S
     ("Last repair undone".into(), lines)
 }
 
+pub(crate) fn remove_result(report: &shiv_repair::RemoveReport) -> (String, Vec<String>) {
+    let mut lines = Vec::new();
+    if !report.removed.is_empty() {
+        lines.push(format!("Removed: {}", names(&report.removed)));
+    }
+    if report.gameinfo_changed {
+        lines.push("gameinfo.gi no longer loads the repair package.".into());
+    }
+    lines.push(format!(
+        "Backup of the removed files: {}",
+        report.backup.display()
+    ));
+    ("Removed the repair package".into(), lines)
+}
+
 // ---------------------------------------------------------------------------
 // Worker side
 
@@ -252,6 +268,7 @@ struct Scan {
     stale: bool,
     running: bool,
     can_undo: bool,
+    has_package: bool,
 }
 
 /// `addons::list` runs first: `analyze` yields no rows for an unreadable
@@ -265,12 +282,14 @@ fn scan(deps: &Deps) -> Result<Scan, String> {
         stale: shiv_repair::overlay_state(&paths) == OverlayState::Stale,
         running: (deps.running)(),
         can_undo: shiv_repair::can_undo(&paths),
+        has_package: shiv_repair::has_package(&paths),
     })
 }
 
 enum Action {
     Apply(Vec<ModId>),
     Undo,
+    Remove,
 }
 
 type Outcome = Result<(String, Vec<String>), String>;
@@ -284,6 +303,9 @@ fn run_action(deps: &Deps, action: &Action, names: &[(ModId, String)]) -> Outcom
             .map_err(|e| error_text(&e)),
         Action::Undo => shiv_repair::restore_last_with(&paths, move || running())
             .map(|report| undo_result(&report))
+            .map_err(|e| error_text(&e)),
+        Action::Remove => shiv_repair::remove_package_with(&paths, move || running())
+            .map(|report| remove_result(&report))
             .map_err(|e| error_text(&e)),
     }
 }
@@ -325,6 +347,7 @@ pub(crate) fn attach_with(app: &App, deps: Deps) {
     state.on_rescan(|| with_repair(|r| r.rescan()));
     state.on_apply(|| with_repair(|r| r.apply()));
     state.on_undo(|| with_repair(|r| r.act(Action::Undo)));
+    state.on_remove_package(|| with_repair(|r| r.act(Action::Remove)));
     state.on_dismiss_result(|| with_repair(|r| r.show_result(None)));
 }
 
@@ -411,6 +434,7 @@ impl Repair {
             s.set_game_running(scan.running);
             s.set_stale(scan.stale);
             s.set_can_undo(scan.can_undo);
+            s.set_has_package(scan.has_package);
             s.set_fixable_count(i32::try_from(fixable).unwrap_or(i32::MAX));
             s.set_summary(summary(&scan.mods).into());
             s.set_apply_label(label.into());
@@ -440,6 +464,7 @@ impl Repair {
         let text = match action {
             Action::Apply(_) => "Backing up and writing the repair package",
             Action::Undo => "Undoing the last repair",
+            Action::Remove => "Removing the repair package",
         };
         self.with_state(|s| {
             s.set_busy(true);
@@ -449,6 +474,7 @@ impl Repair {
         let failed_title = match action {
             Action::Apply(_) => "Repair failed",
             Action::Undo => "Undo failed",
+            Action::Remove => "Removing the repair package failed",
         };
         let deps = self.deps.clone();
         let weak = self.weak.clone();
@@ -633,6 +659,21 @@ mod tests {
         assert_eq!(title, "Last repair undone");
         assert_eq!(lines[0], "Put back: gameinfo.gi");
         assert_eq!(lines[1], "Removed: pak01_dir.vpk");
+        let removed = shiv_repair::RemoveReport {
+            backup: PathBuf::from("/x/backup-2"),
+            removed: vec![PathBuf::from("/g/shiv_repair/pak01_dir.vpk")],
+            gameinfo_changed: true,
+        };
+        let (title, lines) = remove_result(&removed);
+        assert_eq!(title, "Removed the repair package");
+        assert_eq!(
+            lines,
+            [
+                "Removed: pak01_dir.vpk",
+                "gameinfo.gi no longer loads the repair package.",
+                "Backup of the removed files: /x/backup-2",
+            ]
+        );
         assert_eq!(error_text(&RepairError::GameRunning), GAME_RUNNING_TEXT);
         assert_eq!(
             error_text(&RepairError::BackupRestoreFailed(
