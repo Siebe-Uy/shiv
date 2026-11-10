@@ -221,9 +221,13 @@ fn html_tag(raw: &str, lower: &str, i: usize, out: &mut Out) -> Option<usize> {
     Some(end)
 }
 
-/// Unicode format characters (category Cf): bidi overrides and isolates,
-/// zero-width characters, soft hyphen, BOM and tag characters. Invisible,
-/// but able to reorder or hide the text around them.
+/// Unicode format characters (category Cf) that are removed: bidi overrides
+/// and isolates, zero-width spaces and joiners other than ZWNJ/ZWJ, soft
+/// hyphen, BOM. Invisible, but able to reorder or hide the text around them.
+/// Kept because real text needs them: ZWNJ and ZWJ (Persian, Indic scripts,
+/// emoji sequences), LRM and RLM (they only mark direction and cannot
+/// reorder a run like an override), and tag characters U+E0020..U+E007F
+/// (subdivision flags such as England's).
 fn is_format_char(c: char) -> bool {
     matches!(c,
         '\u{ad}'
@@ -232,7 +236,7 @@ fn is_format_char(c: char) -> bool {
         | '\u{6dd}'
         | '\u{70f}'
         | '\u{180e}'
-        | '\u{200b}'..='\u{200f}'
+        | '\u{200b}'
         | '\u{202a}'..='\u{202e}'
         | '\u{2060}'..='\u{2064}'
         | '\u{2066}'..='\u{206f}'
@@ -240,8 +244,7 @@ fn is_format_char(c: char) -> bool {
         | '\u{fff9}'..='\u{fffb}'
         | '\u{110bd}'
         | '\u{1d173}'..='\u{1d17a}'
-        | '\u{e0001}'
-        | '\u{e0020}'..='\u{e007f}')
+        | '\u{e0001}')
 }
 
 /// Length of a tag up to and including its `>`, skipping `>` inside quoted
@@ -522,6 +525,20 @@ mod tests {
         let raw =
             "safe\u{202e}txt.exe\u{202c} a\u{200b}b \u{2066}x\u{2069} &#x202E;y \u{feff}z\u{ad}";
         assert_eq!(to_plain_text(raw), "safetxt.exe ab x y z");
+        // Isolates, other overrides and invisible operators go too.
+        assert_eq!(
+            to_plain_text("a\u{202a}b\u{202b}c\u{202d}d\u{2067}e\u{2068}f\u{2060}g\u{2062}h"),
+            "abcdefgh"
+        );
+        // Kept: ZWNJ (Persian), ZWJ (emoji sequence), LRM/RLM, and the tag
+        // characters of a subdivision flag.
+        let persian = "\u{645}\u{6cc}\u{200c}\u{62e}\u{648}\u{627}\u{647}\u{645}";
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+        let marks = "a\u{200e}b\u{200f}c";
+        let england = "\u{1f3f4}\u{e0067}\u{e0062}\u{e0065}\u{e006e}\u{e0067}\u{e007f}";
+        for kept in [persian, family, marks, england] {
+            assert_eq!(to_plain_text(kept), kept);
+        }
     }
 
     /// Best of five conversions (load spikes only ever add time).
