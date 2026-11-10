@@ -51,6 +51,17 @@ pub struct ModDto {
     pub files_updated_at: Option<String>,
 }
 
+impl ModDto {
+    /// When the mod last changed: the GameBanana update date, else the date
+    /// its files changed. Empty strings count as missing.
+    pub fn last_updated(&self) -> Option<&str> {
+        fn non_empty(s: &Option<String>) -> Option<&str> {
+            s.as_deref().filter(|s| !s.is_empty())
+        }
+        non_empty(&self.remote_updated_at).or_else(|| non_empty(&self.files_updated_at))
+    }
+}
+
 /// One downloadable file from `GET /v2/mods/{id}/downloads`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]

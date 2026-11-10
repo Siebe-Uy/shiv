@@ -25,7 +25,7 @@ use crate::{App, BrowseState, InstallState, LoadState, ModRow};
 
 const SORTS: [(&str, SortKey); 5] = [
     ("Newest", SortKey::Newest),
-    ("Recently updated", SortKey::Updated),
+    ("Last updated", SortKey::Updated),
     ("Most downloaded", SortKey::MostDownloaded),
     ("Most liked", SortKey::MostLiked),
     ("Name", SortKey::Name),
@@ -71,6 +71,18 @@ fn fmt_count(n: u64) -> String {
 
 fn fmt_mb(bytes: u64) -> String {
     format!("{:.1} MB", bytes as f64 / 1_000_000.0)
+}
+
+/// The `YYYY-MM-DD` part of an ISO-8601 timestamp (the UTC date, as the API
+/// sends it); `None` for anything that does not start with a date.
+pub(crate) fn short_date(iso: &str) -> Option<&str> {
+    let date = iso.get(..10)?;
+    let b = date.as_bytes();
+    let ok = b.iter().enumerate().all(|(i, c)| match i {
+        4 | 7 => *c == b'-',
+        _ => c.is_ascii_digit(),
+    });
+    ok.then_some(date)
 }
 
 /// Thumbnail URL for a mod. GameBanana screenshots are rewritten to their
@@ -255,11 +267,15 @@ impl Entry {
             (None, Some(c)) => c.to_owned(),
             (None, None) => String::new(),
         };
-        let stats = format!(
+        let mut stats = format!(
             "{} downloads \u{b7} {} likes",
             fmt_count(m.download_count),
             fmt_count(m.likes)
         );
+        if let Some(date) = m.last_updated().and_then(short_date) {
+            stats.push_str(" \u{b7} Updated ");
+            stats.push_str(date);
+        }
         Entry {
             thumb_url: thumb_url(&m),
             version: m.files_updated_at.or(m.remote_updated_at),
@@ -957,6 +973,36 @@ mod tests {
         );
         assert_eq!(thumb_url(&m(&[], Some(""))), None);
         assert_eq!(thumb_url(&m(&[], None)), None);
+    }
+
+    #[test]
+    fn rows_show_the_last_updated_date() {
+        assert_eq!(short_date("2026-11-08T12:30:00.000Z"), Some("2026-11-08"));
+        assert_eq!(short_date("2026-11-08"), Some("2026-11-08"));
+        assert_eq!(short_date("2026-1-08T00"), None);
+        assert_eq!(short_date("soon"), None);
+        assert_eq!(short_date(""), None);
+        let m = |remote: Option<&str>, files: Option<&str>| ModDto {
+            download_count: 1200,
+            likes: 3,
+            remote_updated_at: remote.map(str::to_owned),
+            files_updated_at: files.map(str::to_owned),
+            ..ModDto::default()
+        };
+        let stats = |d| Entry::from_dto(d).stats.to_string();
+        assert_eq!(
+            stats(m(
+                Some("2026-11-08T01:00:00Z"),
+                Some("2025-01-01T00:00:00Z")
+            )),
+            "1,200 downloads \u{b7} 3 likes \u{b7} Updated 2026-11-08"
+        );
+        assert_eq!(
+            stats(m(None, Some("2025-01-01T00:00:00Z"))),
+            "1,200 downloads \u{b7} 3 likes \u{b7} Updated 2025-01-01"
+        );
+        assert_eq!(stats(m(None, None)), "1,200 downloads \u{b7} 3 likes");
+        assert_eq!(SORTS[1], ("Last updated", SortKey::Updated));
     }
 
     #[test]

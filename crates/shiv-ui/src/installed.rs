@@ -106,6 +106,8 @@ fn entry(m: &InstalledMod) -> Entry {
     };
     let mut parts: Vec<String> = Vec::new();
     if let Some(v) = s.version.as_deref().filter(|v| !v.is_empty()) {
+        // Shiv records the mod's update timestamp as its version.
+        let v = crate::browse::short_date(v).unwrap_or(v);
         parts.push(format!("Version {v}"));
     }
     let mut paks: Vec<u32> = m.vpks.iter().filter_map(|v| v.pak).collect();
@@ -527,6 +529,13 @@ mod tests {
         assert_eq!(e.name, "Neon Hud");
         assert!(e.managed && e.enabled);
         assert_eq!(e.detail, "Version 1.2 \u{b7} pak03");
+        let mut dated = sidecar("m2", "Dated");
+        dated.version = Some("2026-11-08T10:00:00.000Z".into());
+        let m = InstalledMod {
+            sidecar: Some(dated),
+            vpks: vec![vpk("pak04_dir.vpk", Some(4), true)],
+        };
+        assert_eq!(entries(&[m])[0].detail, "Version 2026-11-08 \u{b7} pak04");
         assert_eq!(e.thumb_url.as_deref(), Some("https://x.test/t.png"));
     }
 

@@ -8,7 +8,7 @@ pub enum SortKey {
     /// Most recently added first.
     #[default]
     Newest,
-    /// Most recently updated first.
+    /// Most recently updated first ([`ModDto::last_updated`]).
     Updated,
     MostDownloaded,
     MostLiked,
@@ -82,7 +82,7 @@ pub fn apply_query(mods: &[ModDto], q: &ModQuery) -> ModPage {
     // a missing date sorts last.
     match q.sort {
         SortKey::Newest => hits.sort_by(|a, b| b.remote_added_at.cmp(&a.remote_added_at)),
-        SortKey::Updated => hits.sort_by(|a, b| b.remote_updated_at.cmp(&a.remote_updated_at)),
+        SortKey::Updated => hits.sort_by(|a, b| b.last_updated().cmp(&a.last_updated())),
         SortKey::MostDownloaded => hits.sort_by_key(|m| std::cmp::Reverse(m.download_count)),
         SortKey::MostLiked => hits.sort_by_key(|m| std::cmp::Reverse(m.likes)),
         SortKey::Name => hits.sort_by_key(|m| m.name.to_lowercase()),
@@ -196,6 +196,22 @@ mod tests {
         assert_eq!(
             run(SortKey::Name),
             ["alpha hud", "Bravo Skin", "Charlie Sound"]
+        );
+    }
+
+    #[test]
+    fn updated_falls_back_to_files_updated_and_missing_sorts_last() {
+        let mut mods = sample();
+        mods[0].remote_updated_at = None;
+        mods[0].files_updated_at = Some("2025-04-01T00:00:00Z".into());
+        mods[2].remote_updated_at = Some(String::new());
+        let q = ModQuery {
+            sort: SortKey::Updated,
+            ..ModQuery::default()
+        };
+        assert_eq!(
+            names(&apply_query(&mods, &q)),
+            ["Bravo Skin", "alpha hud", "Charlie Sound"]
         );
     }
 
