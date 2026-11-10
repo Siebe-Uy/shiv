@@ -84,6 +84,8 @@ export global BrowseState {
 
     // Mod detail page, shown over the list (which keeps its state).
     in property <bool> detail-open: false;
+    // Screen to return to when the detail page was opened from elsewhere, -1 for none.
+    in-out property <int> return-screen: -1;
     in property <ModDetail> detail;
     // The detail mod's install state: one row, from the same source as the list.
     in property <[ModRow]> detail-row;

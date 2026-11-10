@@ -62,6 +62,13 @@ thread_local! {
     static BROWSE: RefCell<Option<Rc<Browse>>> = const { RefCell::new(None) };
 }
 
+/// Show a mod's detail page from another screen (`from` is where Back goes).
+pub(crate) fn show_detail_from(id: &str, from: i32) -> bool {
+    let mut shown = false;
+    with_browse(|b| shown = b.show_detail_from(id, from));
+    shown
+}
+
 fn with_browse(f: impl FnOnce(&Rc<Browse>)) {
     if let Some(b) = BROWSE.with(|cell| cell.borrow().clone()) {
         f(&b);
@@ -1482,9 +1489,34 @@ impl Browse {
         self.show_image(0);
     }
 
-    /// Back to the list: the page and every image it decoded are dropped.
+    /// Open a mod's page from another screen; Back returns to `from`.
+    /// False when the catalog has no such mod (not loaded, or removed).
+    fn show_detail_from(&self, id: &str, from: i32) -> bool {
+        if !self.catalog.borrow().iter().any(|m| m.id == id) {
+            return false;
+        }
+        self.open_detail(id);
+        if let Some(app) = self.weak.upgrade() {
+            app.global::<BrowseState>().set_return_screen(from);
+            app.set_screen(0);
+        }
+        true
+    }
+
+    /// Back to the list (or the screen that opened the page): the page and
+    /// every image it decoded are dropped.
     fn close_detail(&self) {
-        self.with_state(|s| s.set_detail_open(false));
+        let mut back = -1;
+        self.with_state(|s| {
+            s.set_detail_open(false);
+            back = s.get_return_screen();
+            s.set_return_screen(-1);
+        });
+        if back >= 0
+            && let Some(app) = self.weak.upgrade()
+        {
+            app.set_screen(back);
+        }
         self.drop_gallery();
         crate::release_freed_memory();
     }

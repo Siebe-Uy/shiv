@@ -1785,6 +1785,18 @@ mod tests {
         assert_eq!(first(&app).as_deref(), Some("Filler 01"));
         assert_eq!(state.get_summary().as_str(), "32 mods");
 
+        // Opened from another screen, Back returns there.
+        assert!(!browse::show_detail_from("missing", 2));
+        assert!(browse::show_detail_from("f4", 2));
+        assert_eq!(app.get_screen(), 0);
+        assert!(state.get_detail_open());
+        click(&app, "Back");
+        assert!(!state.get_detail_open());
+        assert_eq!(app.get_screen(), 2);
+        assert_eq!(state.get_return_screen(), -1);
+        app.set_screen(0);
+        assert_eq!(state.get_list_scroll(), -400.0);
+
         // The gallery mod, opened with a real click on its row.
         state.invoke_search_edited("gallery".into());
         assert!(run_until(&app, Duration::from_secs(5), |a| {

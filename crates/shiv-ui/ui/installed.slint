@@ -38,6 +38,8 @@ export global InstalledState {
     callback dismiss-banner();
     // Show the Repair screen.
     callback open-repair();
+    // Open the mod's catalog detail page (managed mods only).
+    callback open-detail(string);
 }
 
 component InstalledRowView inherits Rectangle {
@@ -47,7 +49,14 @@ component InstalledRowView inherits Rectangle {
     height: 90px + 2 * Theme.s1 + 1px;
     background: hover-area.has-hover ? Theme.raised : transparent;
 
-    hover-area := TouchArea { }
+    hover-area := TouchArea {
+        mouse-cursor: root.item.managed ? pointer : default;
+        clicked => {
+            if (root.item.managed) {
+                InstalledState.open-detail(root.item.id);
+            }
+        }
+    }
 
     HorizontalLayout {
         padding-top: Theme.s1;

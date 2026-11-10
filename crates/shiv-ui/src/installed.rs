@@ -280,6 +280,15 @@ pub(crate) fn attach_with(app: &App, cache: Arc<thumbs::Cache>, deps: Deps) {
     state.on_refresh(|| with_installed(|i| i.refresh(true)));
     state.on_toggle(|id| with_installed(|i| i.toggle(id.as_str())));
     state.on_uninstall(|id| with_installed(|i| i.act(id.as_str(), Action::Uninstall)));
+    state.on_open_detail(|id| {
+        with_installed(|i| {
+            if !crate::browse::show_detail_from(id.as_str(), 1) {
+                i.with_state(|s| {
+                    s.set_banner_text("This mod is not in the catalog, so it has no detail page.".into());
+                });
+            }
+        });
+    });
     state.on_open_repair(|| {
         with_installed(|i| {
             if let Some(app) = i.weak.upgrade() {

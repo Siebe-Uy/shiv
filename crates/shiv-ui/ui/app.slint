@@ -124,7 +124,10 @@ export component App inherits Window {
                     label: name;
                     active: root.screen == i;
                     badge: i == 4 && RepairState.fixable-count > 0 ? RepairState.fixable-count : "";
-                    clicked => { root.screen = i; }
+                    clicked => {
+                        BrowseState.return-screen = -1;
+                        root.screen = i;
+                    }
                 }
 
                 Rectangle { vertical-stretch: 1; }
