@@ -1243,7 +1243,7 @@ mod tests {
             "{}",
             state.get_status_text()
         );
-        assert_eq!(launches.load(Ordering::SeqCst), 5);
+        assert_eq!(launches.load(Ordering::SeqCst), 6);
 
         // Cancel while the opener itself has not returned: it is stopped.
         hold.store(true, Ordering::SeqCst);
@@ -1272,7 +1272,7 @@ mod tests {
             state.get_status_text().as_str(),
             launch::ALREADY_RUNNING_TEXT
         );
-        assert_eq!(launches.load(Ordering::SeqCst), 6);
+        assert_eq!(launches.load(Ordering::SeqCst), 7);
         close_game(&app);
 
         // The opener refusing the link is shown as an error.
@@ -1290,7 +1290,7 @@ mod tests {
             state.get_status_text()
         );
         assert!(!state.get_running() && !state.get_waiting());
-        assert_eq!(launches.load(Ordering::SeqCst), 6);
+        assert_eq!(launches.load(Ordering::SeqCst), 7);
 
         // Where the game process cannot be detected (no process scanning):
         // the request is sent and that is all the status claims; no waiting,
