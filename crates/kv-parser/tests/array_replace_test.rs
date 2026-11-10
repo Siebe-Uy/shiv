@@ -1,5 +1,4 @@
 use kv_parser::{DiffApplicator, DocumentDiff, ParseOptions, Parser, Serializer};
-use serde_json;
 
 #[test]
 fn test_replace_array_in_gameinfo() {

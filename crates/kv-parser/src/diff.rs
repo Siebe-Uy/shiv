@@ -2011,45 +2011,39 @@ mod tests {
                                     found_outer = true;
                                 }
                             }
-                            ValueNode::Object(nested_obj) => {
-                                if kv.key.value == "nested" {
-                                    assert_eq!(nested_obj.children.len(), 2);
-                                    found_nested = true;
+                            ValueNode::Object(nested_obj) if kv.key.value == "nested" => {
+                                assert_eq!(nested_obj.children.len(), 2);
+                                found_nested = true;
 
-                                    let mut found_inner_key = false;
-                                    let mut found_inner_number = false;
+                                let mut found_inner_key = false;
+                                let mut found_inner_number = false;
 
-                                    for nested_child in &nested_obj.children {
-                                        if let AstNode::KeyValue(nested_kv) = nested_child {
-                                            match &nested_kv.value {
-                                                ValueNode::String(nested_s) => {
-                                                    if nested_kv.key.value == "inner_key"
-                                                        && nested_s.value == "inner_value"
-                                                    {
-                                                        found_inner_key = true;
-                                                    }
+                                for nested_child in &nested_obj.children {
+                                    if let AstNode::KeyValue(nested_kv) = nested_child {
+                                        match &nested_kv.value {
+                                            ValueNode::String(nested_s) => {
+                                                if nested_kv.key.value == "inner_key"
+                                                    && nested_s.value == "inner_value"
+                                                {
+                                                    found_inner_key = true;
                                                 }
-                                                ValueNode::Number(n) => {
-                                                    if nested_kv.key.value == "inner_number"
-                                                        && n.value == 42.0
-                                                    {
-                                                        found_inner_number = true;
-                                                    }
-                                                }
-                                                _ => {}
                                             }
+                                            ValueNode::Number(n)
+                                                if nested_kv.key.value == "inner_number"
+                                                    && n.value == 42.0 =>
+                                            {
+                                                found_inner_number = true;
+                                            }
+                                            _ => {}
                                         }
                                     }
-
-                                    assert!(
-                                        found_inner_key,
-                                        "Should have inner_key in nested object"
-                                    );
-                                    assert!(
-                                        found_inner_number,
-                                        "Should have inner_number in nested object"
-                                    );
                                 }
+
+                                assert!(found_inner_key, "Should have inner_key in nested object");
+                                assert!(
+                                    found_inner_number,
+                                    "Should have inner_number in nested object"
+                                );
                             }
                             _ => {}
                         }
@@ -2136,17 +2130,16 @@ mod tests {
         let updated_ast = result.unwrap();
         let mut found_key = false;
         for child in &updated_ast.children {
-            if let AstNode::KeyValue(kv) = child {
-                if kv.key.value == "key" {
-                    if let ValueNode::Object(obj) = &kv.value {
-                        assert_eq!(
-                            obj.children.len(),
-                            2,
-                            "Nested object should have 2 children"
-                        );
-                        found_key = true;
-                    }
-                }
+            if let AstNode::KeyValue(kv) = child
+                && kv.key.value == "key"
+                && let ValueNode::Object(obj) = &kv.value
+            {
+                assert_eq!(
+                    obj.children.len(),
+                    2,
+                    "Nested object should have 2 children"
+                );
+                found_key = true;
             }
         }
         assert!(found_key, "Should have added key with object value");

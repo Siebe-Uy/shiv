@@ -259,7 +259,9 @@ mod tests {
     #[test]
     fn cache_rejects_images_over_decode_limits() {
         // Tiny when encoded, but wider than MAX_DIMENSION.
-        let cache = Cache::with_fetcher(10 * THUMB_BYTES, |_| Some(png(MAX_DIMENSION + 1, 8, [1, 2, 3])));
+        let cache = Cache::with_fetcher(10 * THUMB_BYTES, |_| {
+            Some(png(MAX_DIMENSION + 1, 8, [1, 2, 3]))
+        });
         assert!(cache.get_or_fetch("huge").is_none());
         assert!(cache.has_failed("huge"));
         cache.clear_failed();
