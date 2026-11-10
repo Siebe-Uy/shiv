@@ -279,17 +279,19 @@ fn load_file(deps: &Deps) -> FileLoad {
 }
 
 /// `Err((text, game_running))`.
-fn write(
-    deps: &Deps,
-    entries: &[ConfigEntry],
-) -> Result<HashMap<String, (String, String)>, (String, bool)> {
+/// What a successful apply returns: the file's ConVars as now written, and
+/// where the copy from before Shiv's first change is kept.
+type Written = (HashMap<String, (String, String)>, std::path::PathBuf);
+
+fn write(deps: &Deps, entries: &[ConfigEntry]) -> Result<Written, (String, bool)> {
     let paths = (deps.locate)().map_err(|e| (game_error_text(&e), false))?;
     if (deps.running)() {
         return Err((GAME_RUNNING_TEXT.into(), true));
     }
     let text = |e: perf::PerfError| (sentence(&e.to_string()), false);
     perf::apply(&paths, entries).map_err(text)?;
-    perf::read_current(&paths).map(convars_of).map_err(text)
+    let current = perf::read_current(&paths).map(convars_of).map_err(text)?;
+    Ok((current, perf::original_backup_path(&paths)))
 }
 
 fn spawn(name: &str, f: impl FnOnce() + Send + 'static) -> bool {
@@ -329,6 +331,8 @@ struct Perf {
     selected: RefCell<Option<String>>,
     note: RefCell<String>,
     loading: Cell<bool>,
+    /// The screen is showing; the catalog and list are only kept while it is.
+    on_screen: Cell<bool>,
 }
 
 /// Wire the Performance screen to `app` using the real game and API.
@@ -354,12 +358,14 @@ pub(crate) fn attach_with(app: &App, deps: Deps) {
         selected: RefCell::new(None),
         note: RefCell::new(String::new()),
         loading: Cell::new(false),
+        on_screen: Cell::new(false),
     });
     PERF.with(|p| *p.borrow_mut() = Some(controller.clone()));
     let state = app.global::<PerfState>();
     state.set_rows(ModelRc::from(controller.rows.clone()));
     state.set_changes(ModelRc::from(controller.changes.clone()));
     state.on_shown(|| with_perf(|p| p.shown()));
+    state.on_hidden(|| with_perf(|p| p.hidden()));
     state.on_retry(|| with_perf(|p| p.load()));
     state.on_search(|q| {
         with_perf(|p| {
@@ -428,11 +434,46 @@ impl Perf {
     }
 
     fn shown(&self) {
+        self.on_screen.set(true);
         if self.catalog.borrow().is_none() {
             self.load();
         } else {
             self.reload_file();
         }
+    }
+
+    /// The screen was left: drop the catalog and the list (several MB) and
+    /// keep only the pending edits, the selection and the query. Showing the
+    /// screen again reloads the catalog through the cache's ETag.
+    fn hidden(&self) {
+        if !self.on_screen.replace(false) {
+            return;
+        }
+        self.drop_catalog();
+    }
+
+    /// Load the catalog if the screen was shown again while a read or an
+    /// apply that started earlier was still running.
+    fn resume(&self) {
+        if self.on_screen.get() && self.catalog.borrow().is_none() {
+            self.load();
+        }
+    }
+
+    fn drop_catalog(&self) {
+        *self.catalog.borrow_mut() = None;
+        *self.items.borrow_mut() = Vec::new();
+        *self.visible.borrow_mut() = Vec::new();
+        self.rows.set_vec(Vec::new());
+        self.with_state(|s| {
+            s.set_tiers(ModelRc::default());
+            s.set_editor(PerfEditor::default());
+            s.set_load_state(LoadState::Loading);
+        });
+        // The catalog was parsed on a worker thread, so glibc keeps its pages
+        // in that thread's arena after the drop. Trim once the list's row
+        // components are gone too (they are released on the next frames).
+        slint::Timer::single_shot(std::time::Duration::from_secs(1), release_freed_memory);
     }
 
     /// Load the catalog and the file.
@@ -461,6 +502,10 @@ impl Perf {
 
     fn loaded(&self, catalog: CatalogLoad, file: FileLoad) {
         self.loading.set(false);
+        if !self.on_screen.get() {
+            // Left while loading: keep nothing; the next show loads again.
+            return;
+        }
         match catalog {
             Ok((catalog, origin)) => {
                 *self.catalog.borrow_mut() = Some(catalog);
@@ -492,6 +537,7 @@ impl Perf {
                 with_perf(|p| {
                     p.loading.set(false);
                     p.file_loaded(file);
+                    p.resume();
                 });
             });
         });
@@ -1043,14 +1089,10 @@ impl Perf {
         }
     }
 
-    fn applied(
-        &self,
-        count: usize,
-        result: Result<HashMap<String, (String, String)>, (String, bool)>,
-    ) {
+    fn applied(&self, count: usize, result: Result<Written, (String, bool)>) {
         self.with_state(|s| s.set_busy(false));
         match result {
-            Ok(current) => {
+            Ok((current, original)) => {
                 self.pending.borrow_mut().clear();
                 self.with_state(|s| {
                     s.set_active_tier(-1);
@@ -1067,7 +1109,9 @@ impl Perf {
                     &format!(
                         "Wrote {what} to gameinfo.gi and kept the previous file as gameinfo.gi.bak. \
                          Deadlock uses them the next time it starts. A game update replaces \
-                         gameinfo.gi, so apply again after one."
+                         gameinfo.gi, so apply again after one.\nFile from before Shiv's first \
+                         change: {}",
+                        original.display()
                     ),
                     false,
                 );
@@ -1079,6 +1123,7 @@ impl Perf {
                 self.show_result("Couldn't apply the settings", &text, true);
             }
         }
+        self.resume();
     }
 
     fn show_result(&self, title: &str, detail: &str, error: bool) {
@@ -1087,6 +1132,16 @@ impl Perf {
             s.set_result_detail(detail.into());
             s.set_result_error(error);
         });
+    }
+}
+
+/// Return freed heap pages to the OS (glibc only keeps them otherwise).
+fn release_freed_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: malloc_trim only releases free memory held by the allocator;
+    // it takes no pointers and is safe to call from any thread.
+    unsafe {
+        libc::malloc_trim(0);
     }
 }
 

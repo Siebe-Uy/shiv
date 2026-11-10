@@ -447,8 +447,12 @@ mod tests {
             performance::Deps {
                 locate: Arc::new(move || Ok(located.clone())),
                 running: Arc::new(move || flag.load(Ordering::Relaxed)),
-                fetch: Arc::new(move |_| {
+                fetch: Arc::new(move |etag| {
                     count.fetch_add(1, Ordering::Relaxed);
+                    // The saved copy is current once it has the ETag.
+                    if etag == Some("\"e1\"") {
+                        return Ok(None);
+                    }
                     Ok(Some(("\"e1\"".into(), PERF_CATALOG.as_bytes().to_vec())))
                 }),
                 cache: Some(CatalogCache::new(temp.path().join("cache"))),
@@ -569,6 +573,18 @@ mod tests {
         );
         let backup = paths.gameinfo.with_file_name("gameinfo.gi.bak");
         assert_eq!(std::fs::read_to_string(backup).expect("backup"), original);
+        let first = shiv_core::perf::original_backup_path(&paths);
+        assert_eq!(
+            std::fs::read_to_string(&first).expect("shiv-orig"),
+            original
+        );
+        assert!(
+            state
+                .get_result_detail()
+                .contains(&first.display().to_string()),
+            "{}",
+            state.get_result_detail()
+        );
         assert_eq!(state.get_changes().row_count(), 0);
         assert_eq!(state.get_active_tier(), -1);
         assert_eq!(state.get_apply_label().as_str(), "Apply");
@@ -588,6 +604,27 @@ mod tests {
         };
         assert!(run_until(&app, Duration::from_secs(20), reread));
         assert_eq!(fetches.load(Ordering::Relaxed), 1);
+
+        // Leaving the screen drops the catalog and the list but keeps the
+        // pending edits; coming back reloads from the cache (a 304).
+        click(&app, "Balanced preset");
+        assert_eq!(state.get_changes().row_count(), 2);
+        app.set_screen(0);
+        let dropped = |a: &App| a.global::<PerfState>().get_rows().row_count() == 0;
+        assert!(run_until(&app, Duration::from_secs(20), dropped));
+        assert_eq!(state.get_tiers().row_count(), 0);
+        assert!(!state.get_editor().open);
+        assert_eq!(state.get_changes().row_count(), 2, "pending edits are kept");
+        app.set_screen(3);
+        let back = |a: &App| {
+            let s = a.global::<PerfState>();
+            s.get_load_state() == LoadState::Ready && s.get_rows().row_count() == 4
+        };
+        assert!(run_until(&app, Duration::from_secs(20), back));
+        assert_eq!(fetches.load(Ordering::Relaxed), 2);
+        assert_eq!(state.get_changes().row_count(), 2);
+        assert_eq!(state.get_active_tier(), 1);
+        assert_eq!(state.get_tiers().row_count(), 5);
     }
 
     fn crosshair_flow() {

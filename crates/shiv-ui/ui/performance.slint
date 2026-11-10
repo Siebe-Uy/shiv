@@ -86,8 +86,9 @@ export global PerfState {
     in property <string> result-detail;
     in property <bool> result-error;
 
-    // The screen was shown.
+    // The screen was shown, or left.
     callback shown();
+    callback hidden();
     callback retry();
     callback search(string);
     callback select(int);

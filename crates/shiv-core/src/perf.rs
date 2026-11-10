@@ -32,6 +32,9 @@ use crate::platform;
 pub const SCHEMA_VERSION: u32 = 1;
 
 const BACKUP_SUFFIX: &str = ".bak";
+/// The file as it was before Shiv first changed it; written once, never
+/// replaced (the rolling `.bak` only holds the file before the last apply).
+const ORIGINAL_SUFFIX: &str = ".shiv-orig";
 /// Prefix of a line Shiv commented out (`value: None`).
 const OFF_TAG: &str = "// shiv off: ";
 const CACHE_FILE: &str = "perf-catalog.json";
@@ -349,7 +352,7 @@ impl Catalog {
     }
 
     /// The entries Shiv writes for `tier`'s preset: its ConVars edits, minus
-    /// what the catalog rules deny. Edits in engine sections (SceneSystem,
+    /// what the catalog rules deny and convars the game blocks. Edits in engine sections (SceneSystem,
     /// RenderSystem, ...) are left out, as the old app leaves them out by
     /// default: those are the sections Valve's matchmaking warning lists.
     /// Empty when the catalog has no preset for the tier.
@@ -360,7 +363,12 @@ impl Catalog {
         let mut out: Vec<ConfigEntry> = Vec::new();
         for entry in &preset.entries {
             let is_convar = entry.path.len() == 2 && entry.path[0].eq_ignore_ascii_case("ConVars");
-            if !is_convar || self.writable(&entry.path).is_err() {
+            // The game ignores blocked convars from gameinfo.gi.
+            let blocked = is_convar
+                && self
+                    .convar(&entry.path[1])
+                    .is_some_and(|m| m.status == ConvarStatus::Blocked);
+            if !is_convar || blocked || self.writable(&entry.path).is_err() {
                 continue;
             }
             // The last entry for a path wins, as in a file.
@@ -579,7 +587,8 @@ pub fn read_current(paths: &GamePaths) -> Result<Vec<ConfigEntry>, PerfError> {
 }
 
 /// Write `entries` into `gameinfo.gi`, changing only those paths. The file
-/// as it was is copied to `gameinfo.gi.bak` first, and the new text replaces
+/// as it was is copied to `gameinfo.gi.bak` first (and, the first time only,
+/// to `gameinfo.gi.shiv-orig`, which is never replaced), and the new text replaces
 /// the file through a temp file, keeping its permissions. A read-only file,
 /// a file Shiv can't parse, or an entry it can't write safely fails without
 /// touching anything. Applying values the file already has writes nothing.
@@ -603,11 +612,27 @@ pub fn apply(paths: &GamePaths, entries: &[ConfigEntry]) -> Result<(), PerfError
             io_err("open", &path)(e)
         });
     }
-    let mut backup = path.file_name().unwrap_or_default().to_os_string();
-    backup.push(BACKUP_SUFFIX);
-    let backup = path.with_file_name(backup);
-    write_atomic(&backup, text.as_bytes(), Some(meta.permissions()))?;
+    let original = sibling(&path, ORIGINAL_SUFFIX);
+    if !original.exists() {
+        write_atomic(&original, text.as_bytes(), Some(meta.permissions()))?;
+    }
+    write_atomic(
+        &sibling(&path, BACKUP_SUFFIX),
+        text.as_bytes(),
+        Some(meta.permissions()),
+    )?;
     write_atomic(&path, edited.as_bytes(), Some(meta.permissions()))
+}
+
+fn sibling(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(suffix);
+    path.with_file_name(name)
+}
+
+/// Where `apply` keeps `gameinfo.gi` as it was before Shiv first changed it.
+pub fn original_backup_path(paths: &GamePaths) -> PathBuf {
+    sibling(&paths.gameinfo, ORIGINAL_SUFFIX)
 }
 
 /// Write `contents` to `path` through a temp file in the same folder.

@@ -11,7 +11,7 @@ const GAMEINFO: &str = "\"GameInfo\"\r\n{\r\n\tgame\t\t\"citadel\"\r\n\tFileSyst
 fn catalog_json(schema: u32) -> String {
     let preset = |id: &str, tier: &str, recommended: bool, value: &str| {
         format!(
-            r#"{{"id":"{id}","name":"{id} name","author":"someone","tier":"{tier}","blurb":"{tier} blurb","recommended":{recommended},"source":{{"kind":"bundled"}},"entries":[{{"path":["ConVars","r_ssao"],"value":"{value}"}},{{"path":["ConVars","sv_cheats"],"value":"1"}},{{"path":["FileSystem","x"],"value":"1"}},{{"path":["SceneSystem","CSMCascadeResolution"],"value":"512"}},{{"path":["ConVars","host_timescale"],"value":"2"}},{{"path":["ConVars","r_shadows"],"value":null}}]}}"#
+            r#"{{"id":"{id}","name":"{id} name","author":"someone","tier":"{tier}","blurb":"{tier} blurb","recommended":{recommended},"source":{{"kind":"bundled"}},"entries":[{{"path":["ConVars","r_ssao"],"value":"{value}"}},{{"path":["ConVars","sv_cheats"],"value":"1"}},{{"path":["FileSystem","x"],"value":"1"}},{{"path":["SceneSystem","CSMCascadeResolution"],"value":"512"}},{{"path":["ConVars","host_timescale"],"value":"2"}},{{"path":["ConVars","r_blocked"],"value":"1"}},{{"path":["ConVars","r_shadows"],"value":null}}]}}"#
         )
     };
     let presets = [
@@ -30,6 +30,7 @@ fn catalog_json(schema: u32) -> String {
           {{"name":"r_ssao","kind":"bool","default":"1","help":"Screen-space ambient occlusion","category":"lighting"}},
           {{"name":"fps_max","kind":"int","min":0,"max":1000,"category":"other","flags":["archive"]}},
           {{"name":"r_shadows","kind":"bool","category":"lighting","status":"active"}},
+          {{"name":"r_blocked","kind":"bool","category":"other","status":"blocked"}},
           {{"name":"old_thing","kind":"float","category":"other","status":"removed","statusSinceBuild":6000}}
         ],
         "stock":[{{"build":1,"date":"2026-01-01","entries":[]}}],
@@ -93,7 +94,7 @@ fn preset_returns_entries_for_each_tier() {
     let catalog = Catalog::parse(catalog_json(1).as_bytes()).unwrap();
     for tier in Tier::ALL {
         let entries = catalog.preset(tier);
-        // Denied, excluded and engine-section entries are dropped; ConVars
+        // Denied, blocked, excluded and engine-section entries are dropped; ConVars
         // edits, including commenting out, are kept.
         assert_eq!(entries.len(), 2, "{tier:?}: {entries:?}");
         assert_eq!(entries[1], entry(&["ConVars", "r_shadows"], None));
@@ -260,4 +261,48 @@ fn values_compare_like_the_engine_reads_them() {
     assert!(perf::values_equal("1.50", "1.5"));
     assert!(!perf::values_equal("1", "2"));
     assert!(!perf::values_equal("abc", "abd"));
+}
+
+#[test]
+fn shiv_orig_keeps_the_file_from_before_the_first_apply() {
+    let (_d, paths) = fixture(GAMEINFO);
+    let orig = perf::original_backup_path(&paths);
+    assert_eq!(orig, paths.gameinfo.with_file_name("gameinfo.gi.shiv-orig"));
+    perf::apply(&paths, &[entry(&["ConVars", "r_ssao"], Some("0"))]).unwrap();
+    let after_first = read(&paths.gameinfo);
+    perf::apply(&paths, &[entry(&["ConVars", "fps_max"], Some("100"))]).unwrap();
+    assert_eq!(read(&orig), GAMEINFO, "never replaced");
+    assert_eq!(read(&backup(&paths)), after_first, "the rolling backup");
+    assert!(read(&paths.gameinfo).contains("fps_max 100"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&orig), mode(&paths.gameinfo));
+    }
+}
+
+#[test]
+fn bom_and_already_commented_keys_are_kept() {
+    let text =
+        "\u{feff}GameInfo\n{\n\tConVars\n\t{\n\t\t// \"r_old\" \"1\"\n\t\tfps_max 400\n\t}\n}\n";
+    let (_d, paths) = fixture(text);
+    perf::apply(&paths, &[entry(&["ConVars", "fps_max"], Some("200"))]).unwrap();
+    assert_eq!(
+        read(&paths.gameinfo),
+        text.replace("fps_max 400", "fps_max 200")
+    );
+    // A key commented out by hand counts as absent: commenting it out again
+    // changes nothing, and setting it adds a line (the hand comment stays).
+    perf::apply(&paths, &[entry(&["ConVars", "r_old"], None)]).unwrap();
+    assert_eq!(
+        read(&paths.gameinfo),
+        text.replace("fps_max 400", "fps_max 200")
+    );
+    perf::apply(&paths, &[entry(&["ConVars", "r_old"], Some("0"))]).unwrap();
+    assert_eq!(
+        read(&paths.gameinfo),
+        text.replace("fps_max 400\n", "fps_max 200\n\t\t\"r_old\"\t\t\"0\"\n")
+    );
+    assert!(read(&paths.gameinfo).starts_with('\u{feff}'));
 }

@@ -25,6 +25,10 @@ image = { version = "0.25.10", default-features = false, features = ["jpeg", "pn
 ureq = { version = "3.5.1", default-features = false, features = ["rustls"] }
 tempfile = "3.27.0"
 
+# malloc_trim: hand memory freed by the Performance screen back to the OS.
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+libc = "0.2.191"
+
 [build-dependencies]
 slint-build = "1.18.1"
 
