@@ -86,6 +86,13 @@ Not judgeable by the agent. Measured only: scripted wheel scrolling cost about 1
 - `cargo clippy --workspace --all-targets -- -D warnings`: clean (after the mechanical kv-parser fixes).
 - `timeout 900 cargo test --workspace`: all pass (kv-parser 74+8+2+7, shiv-api 5+13, shiv-core 18+17+14+15+22+11+7, shiv-repair 228 (30 ignored), shiv-ui 25 (1 ignored), source2-model 86 (4 ignored), vpk-parser 2+1, vpkmanager 65).
 
+## Final fix wave: `panic = "unwind"` (2026-11-10)
+
+Release switched from `panic = "abort"` to `panic = "unwind"` so worker panics are caught (`spawn_worker`). Same `cargo build --release -p shiv-ui`, tree at the fix-wave head (also includes the stale-package warnings and Remove repair package):
+
+- Binary: 37,373,240 bytes (35.6 MiB), was 34,875,576 (33.3 MiB): +2.5 MB (+7.2 %), mostly unwind tables and landing pads.
+- RSS: one run of the committed release binary, no measuring patch, `HOME`/`XDG_CACHE_HOME`/`XDG_CONFIG_HOME` pointed at an empty scratch folder so no Steam or game folder is found (the real install was never read), live catalog: Browse 10 s and 30 s after start VmRSS 75.6 MB, VmHWM 79.2 MB. Earlier idle Browse figures: 73.4 MB (fix round 1), 84.0 MB (first run); within run-to-run noise, no measurable cost. Repair and scroll were not re-measured.
+
 ## Unverified
 
 - Scroll feel on both monitors; X11.
