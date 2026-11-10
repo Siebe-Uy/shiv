@@ -726,6 +726,8 @@ pub fn apply_with(
     let mut plan = None;
     let mut learned = None;
     let mut notes = Vec::new();
+    // Decoded once for this repair and freed when it returns.
+    let _embedded = VdataHistoryIndex::embedded();
     if !selected.is_empty() {
         let (built, observed, changed) = LocalizationOverlayPlan::build_learning_history(
             &citadel,

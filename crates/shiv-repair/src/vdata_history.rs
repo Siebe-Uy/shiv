@@ -169,9 +169,12 @@ impl VdataHistoryIndex {
     ) -> bool {
         let key = field_key(row_name, &[Kv3Seg::Key(field_name.into())]);
         let value = value_fingerprint(&Kv3Value::String(value.into()), FingerprintMode::Exact);
-        let pair = (string_binding_key(file_path, key), value);
-        self.observed_strings.binary_search(&pair).is_ok()
-            || self.fallback_strings.binary_search(&pair).is_ok()
+        self.has_binding(&(string_binding_key(file_path, key), value))
+    }
+
+    fn has_binding(&self, pair: &(Fingerprint, Fingerprint)) -> bool {
+        self.observed_strings.binary_search(pair).is_ok()
+            || self.fallback_strings.binary_search(pair).is_ok()
     }
 
     /// The history shipped with Shiv. It is decoded on first use and freed
@@ -486,10 +489,7 @@ impl VdataHistoryIndex {
         let new: Vec<_> = bindings
             .iter()
             .map(|(&key, &value)| (key, value))
-            .filter(|pair| {
-                self.observed_strings.binary_search(pair).is_err()
-                    && self.fallback_strings.binary_search(pair).is_err()
-            })
+            .filter(|pair| !self.has_binding(pair))
             .collect();
         let bindings_changed = !new.is_empty();
         if bindings_changed {
@@ -556,10 +556,14 @@ impl VdataHistoryIndex {
                 push_changes(&mut output, &build.fields)?;
             }
         }
-        write_string_bindings(
-            &mut output,
-            &union(&self.observed_strings, &self.fallback_strings),
-        )?;
+        if self.fallback_strings.is_empty() {
+            write_string_bindings(&mut output, &self.observed_strings)?;
+        } else {
+            write_string_bindings(
+                &mut output,
+                &union(&self.observed_strings, &self.fallback_strings),
+            )?;
+        }
         Ok(output)
     }
 }
@@ -1274,5 +1278,245 @@ mod tests {
         assert!(baseline.is_none());
         assert_eq!(evidence.status, BaselineStatus::Ambiguous);
         assert_eq!(evidence.build_versions, vec![1, 2]);
+    }
+
+    // The string bindings used to be a `BTreeMap<key, BTreeSet<value>>`; the
+    // tests below keep that model beside the flat sorted list and compare.
+    type Model = BTreeMap<Fingerprint, BTreeSet<Fingerprint>>;
+
+    fn fp(n: u8) -> Fingerprint {
+        [n; FINGERPRINT_SIZE]
+    }
+
+    fn flatten(model: &Model) -> StringBindings {
+        model
+            .iter()
+            .flat_map(|(key, values)| values.iter().map(move |value| (*key, *value)))
+            .collect()
+    }
+
+    fn model_union(a: &Model, b: &Model) -> Model {
+        let mut out = a.clone();
+        for (key, values) in b {
+            out.entry(*key).or_default().extend(values);
+        }
+        out
+    }
+
+    /// The old writer: one key, its count and its values, in map order.
+    fn old_bindings_bytes(model: &Model) -> Vec<u8> {
+        let mut output = Vec::new();
+        push_u32(&mut output, model.len()).unwrap();
+        for (key, values) in model {
+            output.extend_from_slice(key);
+            push_u32(&mut output, values.len()).unwrap();
+            for value in values {
+                output.extend_from_slice(value);
+            }
+        }
+        output
+    }
+
+    /// A current-format file with no tables whose binding section lists
+    /// `groups` verbatim (duplicate keys allowed), and the old decode of it
+    /// (a later duplicate key replaced the earlier set).
+    fn exact_file(groups: &[(u8, &[u8])]) -> (Vec<u8>, Model) {
+        let mut bytes = MAGIC.to_vec();
+        push_u32_value(&mut bytes, 0);
+        push_u32(&mut bytes, groups.len()).unwrap();
+        let mut model = Model::new();
+        for (key, values) in groups {
+            bytes.extend_from_slice(&fp(*key));
+            push_u32(&mut bytes, values.len()).unwrap();
+            for value in *values {
+                bytes.extend_from_slice(&fp(*value));
+            }
+            model.insert(fp(*key), values.iter().map(|value| fp(*value)).collect());
+        }
+        (bytes, model)
+    }
+
+    fn assert_matches_model(index: &VdataHistoryIndex, model: &Model) {
+        let mut all = union(&index.observed_strings, &index.fallback_strings);
+        all.dedup();
+        assert_eq!(all, flatten(model));
+        for key in 0..12 {
+            for value in 0..12 {
+                let pair = (fp(key), fp(value));
+                let expected = model.get(&pair.0).is_some_and(|set| set.contains(&pair.1));
+                assert_eq!(index.has_binding(&pair), expected, "{key} {value}");
+            }
+        }
+    }
+
+    #[test]
+    fn flat_bindings_decode_combine_and_write_like_the_old_map() {
+        // Key 1 appears twice: the old decode kept only the second set.
+        let (base_bytes, base_model) =
+            exact_file(&[(1, &[1, 2]), (2, &[3]), (1, &[4, 5]), (3, &[6, 7])]);
+        assert_eq!(base_model[&fp(1)], BTreeSet::from([fp(4), fp(5)]));
+        let base = VdataHistoryIndex::from_bytes(&base_bytes).unwrap();
+        assert_eq!(*base.observed_strings, flatten(&base_model));
+        assert_matches_model(&base, &base_model);
+        assert_eq!(
+            &base.to_bytes().unwrap()[12..],
+            old_bindings_bytes(&base_model)
+        );
+        assert_eq!(
+            base.to_bytes().unwrap(),
+            base_bytes[..12]
+                .iter()
+                .copied()
+                .chain(old_bindings_bytes(&base_model))
+                .collect::<Vec<_>>()
+        );
+
+        // (2, 3) and (3, 7) are on both sides; (2, 8) and key 9 only here.
+        let (observed_bytes, observed_model) = exact_file(&[(2, &[3, 8]), (3, &[7]), (9, &[10])]);
+        let observed = VdataHistoryIndex::from_bytes(&observed_bytes).unwrap();
+        let cases = [
+            (observed, model_union(&observed_model, &base_model)),
+            (VdataHistoryIndex::default(), base_model.clone()),
+        ];
+        for (observed, expected) in cases {
+            let combined = base.with_observed(&observed);
+            assert_matches_model(&combined, &expected);
+            let mut old_bytes = MAGIC.to_vec();
+            push_u32_value(&mut old_bytes, 0);
+            old_bytes.extend(old_bindings_bytes(&expected));
+            assert_eq!(combined.to_bytes().unwrap(), old_bytes);
+            // Combining a combined index again still sees the same union.
+            let again = VdataHistoryIndex::default().with_observed(&combined);
+            assert_matches_model(&again, &expected);
+            assert_eq!(again.to_bytes().unwrap(), old_bytes);
+        }
+        // An empty base adds nothing.
+        let alone = VdataHistoryIndex::default().with_observed(&base);
+        assert_matches_model(&alone, &base_model);
+    }
+
+    #[test]
+    fn legacy_and_exact_decodes_carry_field_values_like_the_old_map() {
+        let change = |key: u8, value: Option<u8>| FingerprintChange {
+            key: fp(key),
+            value: value.map(fp),
+        };
+        // The second table normalizes to the first one's path: the old decode
+        // replaced the table but kept the bindings it had already carried.
+        let tables: [(&str, Vec<Vec<FingerprintChange>>); 2] = [
+            (
+                "scripts/a.vdata_c",
+                vec![
+                    vec![change(1, Some(1)), change(2, Some(2)), change(3, None)],
+                    vec![change(1, Some(1)), change(2, Some(4))],
+                ],
+            ),
+            (
+                "Scripts\\A.vdata_c",
+                vec![vec![change(1, Some(1)), change(5, Some(6))]],
+            ),
+        ];
+        for magic in [LEGACY_MAGIC, EXACT_MAGIC] {
+            let mut bytes = magic.to_vec();
+            push_u32_value(&mut bytes, 2);
+            let mut model = Model::new();
+            for (path, builds) in &tables {
+                push_string(&mut bytes, path).unwrap();
+                push_u32(&mut bytes, builds.len()).unwrap();
+                for (version, fields) in builds.iter().enumerate() {
+                    push_u32_value(&mut bytes, u32::try_from(version).unwrap());
+                    push_changes(&mut bytes, &[]).unwrap();
+                    if magic == EXACT_MAGIC {
+                        push_changes(&mut bytes, &[]).unwrap();
+                    }
+                    push_changes(&mut bytes, fields).unwrap();
+                    for field in fields {
+                        if let Some(value) = field.value {
+                            model
+                                .entry(string_binding_key(path, field.key))
+                                .or_default()
+                                .insert(value);
+                        }
+                    }
+                }
+            }
+            let index = VdataHistoryIndex::from_bytes(&bytes).unwrap();
+            assert_eq!(index.tables.len(), 1);
+            let strings = &*index.observed_strings;
+            assert!(
+                strings.windows(2).all(|pair| pair[0] < pair[1]),
+                "sorted, unique"
+            );
+            assert_eq!(*strings, flatten(&model));
+            assert_eq!(strings.len(), 4);
+            assert!(index.fallback_strings.is_empty());
+        }
+    }
+
+    #[test]
+    fn recording_reports_new_bindings_like_the_old_map() {
+        let path = "scripts/heroes.vdata_c";
+        let table = |model: &str| {
+            Kv3Value::Object(vec![(
+                "hero_a".into(),
+                Kv3Value::Object(vec![(
+                    "m_strModelName".into(),
+                    Kv3Value::String(model.into()),
+                )]),
+            )])
+        };
+        let (old, new) = (table("models/old.vmdl"), table("models/new.vmdl"));
+        let mut embedded = VdataHistoryIndex::default();
+        embedded.record(path, 1, &old).unwrap();
+        // The table is already learned, so only the bindings decide the result.
+        let mut observed = VdataHistoryIndex::default();
+        observed.record(path, 1, &old).unwrap();
+        observed.observed_strings = Arc::default();
+
+        // Old model: the combined set held the embedded bindings, so
+        // re-recording the same value inserted nothing.
+        let mut combined = embedded.with_observed(&observed);
+        let mut old_model = Model::new();
+        for (key, value) in string_bindings(path, &old) {
+            old_model.entry(key).or_default().insert(value);
+        }
+        assert_matches_model(&combined, &old_model);
+        assert!(!combined.record(path, 1, &old).unwrap());
+        assert!(combined.observed_strings.is_empty());
+        assert!(combined.observed_string_field(
+            path,
+            "hero_a",
+            "m_strModelName",
+            "models/old.vmdl"
+        ));
+        assert!(!combined.observed_string_field(
+            path,
+            "hero_a",
+            "m_strModelName",
+            "models/new.vmdl"
+        ));
+
+        // Without the embedded binding the same record is new.
+        let mut alone = VdataHistoryIndex::default().with_observed(&observed);
+        assert!(alone.record(path, 1, &old).unwrap());
+        assert!(!alone.record(path, 1, &old).unwrap());
+
+        // A value in neither side is new and then known; the table changes too.
+        assert!(combined.record(path, 2, &new).unwrap());
+        assert!(combined.observed_string_field(
+            path,
+            "hero_a",
+            "m_strModelName",
+            "models/new.vmdl"
+        ));
+        let mut bytes_model = old_model;
+        for (key, value) in string_bindings(path, &new) {
+            bytes_model.entry(key).or_default().insert(value);
+        }
+        let written = combined.to_bytes().unwrap();
+        let tail = old_bindings_bytes(&bytes_model);
+        assert_eq!(&written[written.len() - tail.len()..], tail.as_slice());
+        let restored = VdataHistoryIndex::from_bytes(&written).unwrap();
+        assert_eq!(*restored.observed_strings, flatten(&bytes_model));
     }
 }
