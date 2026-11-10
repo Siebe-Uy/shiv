@@ -90,26 +90,18 @@ pub struct ConfigEntry {
 pub enum Tier {
     Pretty,
     Balanced,
-    Lean,
     Sweaty,
     Potato,
 }
 
 impl Tier {
     /// Prettiest to fastest.
-    pub const ALL: [Tier; 5] = [
-        Tier::Pretty,
-        Tier::Balanced,
-        Tier::Lean,
-        Tier::Sweaty,
-        Tier::Potato,
-    ];
+    pub const ALL: [Tier; 4] = [Tier::Pretty, Tier::Balanced, Tier::Sweaty, Tier::Potato];
 
     pub fn label(self) -> &'static str {
         match self {
             Tier::Pretty => "Pretty",
             Tier::Balanced => "Balanced",
-            Tier::Lean => "Lean",
             Tier::Sweaty => "Sweaty",
             Tier::Potato => "Potato",
         }
@@ -236,9 +228,29 @@ struct CatalogFile {
     generated_at: String,
     categories: Vec<Category>,
     convars: Vec<ConvarMeta>,
-    #[serde(default)]
+    /// Presets of a tier Shiv does not offer (e.g. a retired "lean") are skipped.
+    #[serde(default, deserialize_with = "known_tier_presets")]
     presets: Vec<Preset>,
     rules: Rules,
+}
+
+/// Presets whose `tier` is one of [`Tier::ALL`]. A preset naming another tier
+/// is dropped rather than failing the whole catalog; any other malformed
+/// preset still fails it.
+fn known_tier_presets<'de, D>(d: D) -> Result<Vec<Preset>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    let raw: Vec<serde_json::Value> = Deserialize::deserialize(d)?;
+    raw.into_iter()
+        .filter(|v| {
+            v.get("tier")
+                .filter(|t| t.is_string())
+                .is_none_or(|t| serde_json::from_value::<Tier>(t.clone()).is_ok())
+        })
+        .map(|v| serde_json::from_value(v).map_err(D::Error::custom))
+        .collect()
 }
 
 #[derive(Deserialize)]

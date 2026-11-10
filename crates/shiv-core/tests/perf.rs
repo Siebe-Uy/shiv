@@ -18,7 +18,9 @@ fn catalog_json(schema: u32) -> String {
         preset("pretty-one", "pretty", false, "1"),
         preset("balanced-other", "balanced", false, "9"),
         preset("balanced-rec", "balanced", true, "0"),
+        // A tier Shiv does not offer: skipped, the catalog still parses.
         preset("lean-one", "lean", false, "0"),
+        preset("future-one", "ultra", false, "0"),
         preset("sweaty-one", "sweaty", false, "0"),
         preset("potato-one", "potato", false, "0"),
     ]
@@ -108,6 +110,13 @@ fn preset_returns_entries_for_each_tier() {
     assert_eq!(
         catalog.preset_info(Tier::Balanced).unwrap().id,
         "balanced-rec"
+    );
+    assert_eq!(Tier::ALL.len(), 4, "no lean tier");
+    let mut bad = catalog_json(1);
+    bad = bad.replacen(r#""tier":"potato""#, r#""tier":7"#, 1);
+    assert!(
+        Catalog::parse(bad.as_bytes()).is_err(),
+        "a malformed tier still fails the catalog"
     );
     assert_eq!(
         catalog.denied_reason(&["convars".into(), "TIMESCALE".into()]),

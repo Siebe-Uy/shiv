@@ -573,7 +573,8 @@ mod tests {
     /// keeps the user's other settings and drops the old autoexec block;
     /// edits are dropped while an apply writes; unapplied edits survive a
     /// re-show; a missing Steam shows a clear error.
-    /// A small perf catalog: no lean preset, one denied convar.
+    /// A small perf catalog: one preset per tier plus a retired "lean" one
+    /// (skipped), one denied convar.
     pub(crate) const PERF_CATALOG: &str = r#"{"schemaVersion":1,"version":"2026.11.07-1","generatedAt":"x",
       "categories":[{"id":"lighting","label":"Lighting","weight":2}],
       "convars":[
@@ -587,7 +588,8 @@ mod tests {
          "entries":[{"path":["ConVars","r_ssao"],"value":"false"},{"path":["ConVars","fps_max"],"value":"240"},{"path":["ConVars","sv_cheats"],"value":"1"}]},
         {"id":"p","name":"Pretty","author":"me","tier":"pretty","blurb":"Nice.","source":{"kind":"bundled"},"entries":[{"path":["ConVars","r_ssao"],"value":"true"},{"path":["ConVars","r_mode"],"value":"1"}]},
         {"id":"s","name":"Sweat","author":"me","tier":"sweaty","blurb":"Fast.","source":{"kind":"bundled"},"entries":[{"path":["ConVars","r_ssao"],"value":"false"}]},
-        {"id":"t","name":"Potato","author":"me","tier":"potato","blurb":"Fastest.","source":{"kind":"bundled"},"entries":[{"path":["ConVars","r_ssao"],"value":"0"}]}
+        {"id":"t","name":"Potato","author":"me","tier":"potato","blurb":"Fastest.","source":{"kind":"bundled"},"entries":[{"path":["ConVars","r_ssao"],"value":"0"}]},
+        {"id":"l","name":"Lean","author":"me","tier":"lean","blurb":"Old.","source":{"kind":"bundled"},"entries":[{"path":["ConVars","r_ssao"],"value":"0"}]}
       ],
       "rules":{"excludedSections":["FileSystem"],"guardedSections":[],"denied":[{"path":["ConVars","sv_cheats"],"reason":"Turns on cheats."}]}}"#;
 
@@ -638,9 +640,10 @@ mod tests {
             "Catalog 2026.11.07-1 · 2 settings set in gameinfo.gi"
         );
         let tiers: Vec<_> = state.get_tiers().iter().collect();
-        assert_eq!(tiers.len(), 5);
-        assert!(!tiers[2].available, "the catalog has no lean preset");
-        assert!(tiers[1].available && tiers[1].name.contains("Bal"));
+        let labels: Vec<_> = tiers.iter().map(|t| t.label.to_string()).collect();
+        assert_eq!(labels, ["Pretty", "Balanced", "Sweaty", "Potato"]);
+        assert!(tiers.iter().all(|t| t.available));
+        assert!(tiers[1].name.contains("Bal"));
         // Settings the file sets come first.
         let rows: Vec<_> = state.get_rows().iter().collect();
         assert_eq!(rows[0].name.as_str(), "fps_max");
@@ -791,7 +794,7 @@ mod tests {
         assert_eq!(fetches.load(Ordering::Relaxed), 2);
         assert_eq!(state.get_changes().row_count(), 2);
         assert_eq!(state.get_active_tier(), 1);
-        assert_eq!(state.get_tiers().row_count(), 5);
+        assert_eq!(state.get_tiers().row_count(), 4);
     }
 
     fn crosshair_flow() {
