@@ -96,6 +96,12 @@ pub(crate) fn open(remote_id: &str, audio: bool) {
     with_tabs(|t| t.reset(Some((remote_id.to_owned(), audio))));
 }
 
+/// Developer probe: switch the open page to a tab.
+#[cfg(any(debug_assertions, feature = "dev-probe"))]
+pub(crate) fn select_for_probe(index: i32) {
+    with_tabs(|t| t.select(index));
+}
+
 /// The page closed: drop everything it loaded.
 pub(crate) fn close() {
     with_tabs(|t| t.reset(None));

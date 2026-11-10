@@ -1870,7 +1870,8 @@ impl Browse {
 /// loaded: `SHIV_OPEN_MOD=<id>` opens that mod's detail page (after
 /// `SHIV_OPEN_AFTER_SECS`, default 0), `SHIV_GALLERY_STEPS=<n>` then shows the
 /// next image n times (one per second), and `SHIV_CLOSE_DETAIL_SECS=<s>` goes
-/// Back s seconds after opening.
+/// Back s seconds after opening. `SHIV_DETAIL_TAB=<n>` picks a detail tab a
+/// second after opening.
 #[cfg(any(debug_assertions, feature = "dev-probe"))]
 mod dev_probe {
     use super::*;
@@ -1910,6 +1911,11 @@ mod dev_probe {
         let steps = num("SHIV_GALLERY_STEPS").unwrap_or(0);
         let close = num("SHIV_CLOSE_DETAIL_SECS");
         after(open, move |b| b.open_detail(&id));
+        if let Some(tab) = num("SHIV_DETAIL_TAB") {
+            after(open + 1, move |_| {
+                crate::detail_tabs::select_for_probe(tab as i32);
+            });
+        }
         for n in 1..=steps {
             after(open + n, |b| b.gallery_step(1));
         }
