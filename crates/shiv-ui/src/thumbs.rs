@@ -396,6 +396,34 @@ mod tests {
         assert!(max_diff <= 4, "detail leaked: {max_diff}");
         // Mid grey everywhere, not a dimmed copy of the pattern.
         assert!(a.rgba().chunks(4).all(|p| (120..=136).contains(&p[0])));
+        // Coarse structure (left half black, right half white) survives as
+        // broad fields, so the output is a real blur of this image, not a
+        // fixed placeholder: dark on the left edge, light on the right.
+        let mut split = Vec::with_capacity(THUMB_BYTES);
+        for _y in 0..DISPLAY_H {
+            for x in 0..DISPLAY_W {
+                let v = if x < DISPLAY_W / 2 { 0 } else { 255 };
+                split.extend_from_slice(&[v, v, v, 255]);
+            }
+        }
+        let split = obscured(&Image {
+            width: DISPLAY_W,
+            height: DISPLAY_H,
+            rgba: Arc::from(split),
+        })
+        .unwrap();
+        let px = |x: u32, y: u32| split.rgba()[((y * OBSCURED_W + x) * 4) as usize];
+        for y in [0, OBSCURED_H / 2, OBSCURED_H - 1] {
+            assert!(px(0, y) < 30, "left {}", px(0, y));
+            assert!(
+                px(OBSCURED_W - 1, y) > 225,
+                "right {}",
+                px(OBSCURED_W - 1, y)
+            );
+            // The edge itself is soft, not a hard step.
+            let mid = px(OBSCURED_W / 2, y);
+            assert!((40..=215).contains(&mid), "edge {mid}");
+        }
         // A malformed buffer is refused, not a panic.
         let bad = Image {
             width: 10,

@@ -2331,6 +2331,18 @@ mod tests {
         assert_eq!(hooks::in_flight("m3"), None);
         click(&app, "Dismiss");
 
+        // A file picked for a mod that left the list meanwhile: a short
+        // banner, nothing started.
+        hooks::pick_for_vanished_mod();
+        assert!(!state.get_picker_open());
+        assert!(
+            state.get_banner_text().contains("no longer in the list"),
+            "{}",
+            state.get_banner_text()
+        );
+        assert_eq!(hooks::in_flight("vanished"), None);
+        click(&app, "Dismiss");
+
         // Cancel while the list is still loading: back to idle, no picker later.
         state.invoke_install("m3".into());
         assert!(hooks::resolving("m3"));

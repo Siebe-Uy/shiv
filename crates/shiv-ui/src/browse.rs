@@ -1237,6 +1237,10 @@ impl Browse {
             return;
         }
         let Some(entry) = self.list.find(id) else {
+            // The catalog was reloaded or filtered meanwhile.
+            self.set_banner(
+                "Could not install: that mod is no longer in the list. Find it again and retry.",
+            );
             return;
         };
         let generation = self.next_job.get() + 1;
@@ -1678,6 +1682,20 @@ pub(crate) mod test_hooks {
     }
 
     /// What the download-list request delivers for the current request of `id`.
+    /// The picker is open for a mod that has since left the list; pick a file.
+    pub fn pick_for_vanished_mod() {
+        with_browse(|b| {
+            let file = DownloadFile {
+                url: "http://127.0.0.1:9/x.zip".into(),
+                name: "x.zip".into(),
+                size: None,
+                md5_checksum: None,
+            };
+            *b.picker.borrow_mut() = Some(("vanished".into(), vec![file]));
+            b.pick_download(0);
+        });
+    }
+
     pub fn resolve(id: &str, urls: &[&str]) {
         with_browse(|b| {
             let Some(generation) = b.list.resolving.borrow().get(id).copied() else {
