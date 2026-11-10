@@ -227,7 +227,9 @@ mod tests {
             click(&app, screen);
             assert_eq!(app.get_screen(), ((i + 1) % 5) as i32, "{screen}");
         }
-        install_cancel_and_failure(&stub_api());
+        let api = stub_api();
+        install_cancel_and_failure(&api);
+        nsfw_flow(&api);
         installed_screen();
         launch_flow();
         repair_flow();
@@ -1421,17 +1423,35 @@ mod tests {
             == LoadState::Ready));
     }
 
-    /// Catalog with one mod; every other path (the downloads list) is 404, so
-    /// an install can never reach the real addons folder.
+    /// A 64x36 PNG: a white square on black, so a blurred copy differs from it.
+    fn stub_png() -> Vec<u8> {
+        let img = image::RgbImage::from_fn(64, 36, |x, y| {
+            let on = (16..48).contains(&x) && (8..28).contains(&y);
+            image::Rgb(if on { [255; 3] } else { [0; 3] })
+        });
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::Png)
+            .expect("encode png");
+        out.into_inner()
+    }
+
+    /// Catalog with a mod and an NSFW mod sharing one thumbnail; every other
+    /// path (the downloads list) is 404, so an install can never reach the
+    /// real addons folder.
     fn stub_api() -> String {
         let server = tiny_http::Server::http("127.0.0.1:0").expect("stub server");
         let url = format!("http://{}", server.server_addr().to_ip().expect("ip"));
+        let catalog = format!(
+            r#"[{{"id":"m1","remoteId":"1","name":"Test Mod","downloadable":true,"thumbnailUrl":"{url}/t.png"}},
+               {{"id":"m2","remoteId":"2","name":"Spicy Skin","downloadable":true,"isNSFW":true,"thumbnailUrl":"{url}/t.png"}}]"#
+        );
+        let png = stub_png();
         std::thread::spawn(move || {
             for req in server.incoming_requests() {
                 let resp = if req.url() == "/v2/mods" {
-                    tiny_http::Response::from_string(
-                        r#"[{"id":"m1","remoteId":"1","name":"Test Mod","downloadable":true}]"#,
-                    )
+                    tiny_http::Response::from_string(catalog.clone())
+                } else if req.url() == "/t.png" {
+                    tiny_http::Response::from_data(png.clone())
                 } else {
                     tiny_http::Response::from_string("not found").with_status_code(404)
                 };
@@ -1439,6 +1459,65 @@ mod tests {
             }
         });
         url
+    }
+
+    /// NSFW mods are listed with a tag and a blurred thumbnail; Show NSFW
+    /// shows the real one and turns back off for a new session; search still
+    /// finds them.
+    fn nsfw_flow(api: &str) {
+        use i_slint_backend_testing::AccessibleRole;
+        let app = App::new().expect("app");
+        browse::attach(&app, api);
+        app.show().expect("show");
+        let state = app.global::<BrowseState>();
+        let thumbs_loaded = |a: &App| {
+            let mods = a.global::<BrowseState>().get_mods();
+            mods.row_count() == 2 && mods.iter().all(|r| r.has_thumb)
+        };
+        assert!(run_until(&app, Duration::from_secs(20), thumbs_loaded));
+        assert!(!state.get_show_nsfw());
+        let row = |i: usize| state.get_mods().row_data(i).expect("row");
+        assert!(!row(0).nsfw);
+        assert!(row(1).nsfw);
+        assert_eq!(row(1).name.as_str(), "Spicy Skin");
+        let size = |i: usize| {
+            let s = row(i).thumb.size();
+            (s.width, s.height)
+        };
+        assert_eq!(size(0), (thumbs::DISPLAY_W, thumbs::DISPLAY_H));
+        // Same source image, but only the reduced blurred copy is shown.
+        assert_eq!(size(1), (thumbs::OBSCURED_W, thumbs::OBSCURED_H));
+
+        let switch = ElementHandle::find_by_accessible_label(&app, "Show NSFW")
+            .find(|e| e.accessible_role() == Some(AccessibleRole::Switch))
+            .expect("Show NSFW switch");
+        switch.invoke_accessible_default_action();
+        assert!(state.get_show_nsfw());
+        assert_eq!(size(1), (thumbs::DISPLAY_W, thumbs::DISPLAY_H));
+        switch.invoke_accessible_default_action();
+        assert!(!state.get_show_nsfw());
+        assert_eq!(size(1), (thumbs::OBSCURED_W, thumbs::OBSCURED_H));
+
+        // Search finds NSFW mods too.
+        state.invoke_search_edited("spicy".into());
+        assert!(run_until(&app, Duration::from_secs(5), |a| {
+            a.global::<BrowseState>().get_mods().row_count() == 1
+        }));
+        assert!(row(0).nsfw);
+        assert_eq!(state.get_summary().as_str(), "1 of 2 mods");
+
+        // A new session starts with NSFW blurred again.
+        switch.invoke_accessible_default_action();
+        let app2 = App::new().expect("app");
+        browse::attach(&app2, api);
+        assert!(!app2.global::<BrowseState>().get_show_nsfw());
+        assert!(run_until(&app2, Duration::from_secs(20), thumbs_loaded));
+        let r = app2
+            .global::<BrowseState>()
+            .get_mods()
+            .row_data(1)
+            .expect("row");
+        assert_eq!(r.thumb.size().width, thumbs::OBSCURED_W);
     }
 
     /// Install shows progress state; Cancel returns to idle at once and later

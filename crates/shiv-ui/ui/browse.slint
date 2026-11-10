@@ -2,7 +2,7 @@
 
 import { ListView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { Button, TextButton, SearchField, Dropdown, ProgressBar } from "widgets.slint";
+import { Button, TextButton, SearchField, Dropdown, ProgressBar, Switch } from "widgets.slint";
 
 export enum LoadState { loading, ready, failed }
 
@@ -17,6 +17,8 @@ export struct ModRow {
     stats: string,
     thumb: image,
     has-thumb: bool,
+    // Marked NSFW; `thumb` is a blurred copy unless Show NSFW is on.
+    nsfw: bool,
     state: InstallState,
     // 0..1, negative when the size is unknown.
     progress: float,
@@ -34,6 +36,8 @@ export global BrowseState {
     in property <[string]> categories: ["All categories"];
     in-out property <int> sort-index: 0;
     in-out property <int> category-index: 0;
+    // NSFW thumbnails shown unblurred; off at every start.
+    in property <bool> show-nsfw: false;
 
     callback search-edited(string);
     callback sort-selected(int);
@@ -42,6 +46,7 @@ export global BrowseState {
     callback install(string);
     callback cancel(string);
     callback dismiss-banner();
+    callback toggle-nsfw();
     // The screen was shown: re-read which mods are installed.
     callback shown();
 }
@@ -80,12 +85,32 @@ component ModRowView inherits Rectangle {
             alignment: center;
             spacing: Theme.s1;
             horizontal-stretch: 1;
-            Text {
-                text: root.item.name;
-                color: Theme.text;
-                font-size: Theme.text-lg;
-                font-weight: 600;
-                overflow: elide;
+            HorizontalLayout {
+                spacing: Theme.s1;
+                Text {
+                    text: root.item.name;
+                    color: Theme.text;
+                    font-size: Theme.text-lg;
+                    font-weight: 600;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                    max-width: self.preferred-width;
+                }
+                if root.item.nsfw: Rectangle {
+                    width: nsfw-tag.preferred-width + Theme.s1;
+                    height: nsfw-tag.preferred-height + 4px;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: Theme.radius;
+                    border-width: 1px;
+                    border-color: Theme.danger;
+                    nsfw-tag := Text {
+                        text: "NSFW";
+                        color: Theme.danger;
+                        font-size: Theme.text-sm;
+                        font-weight: 600;
+                    }
+                }
+                Rectangle { horizontal-stretch: 1; }
             }
             Text {
                 text: root.item.byline;
@@ -199,6 +224,22 @@ export component BrowsePage inherits Rectangle {
                 font-size: Theme.text-xl;
                 font-weight: 600;
                 horizontal-stretch: 1;
+            }
+            HorizontalLayout {
+                spacing: Theme.s1;
+                padding-right: Theme.s3;
+                Text {
+                    text: "Show NSFW";
+                    color: Theme.text-muted;
+                    font-size: Theme.text-md;
+                    vertical-alignment: center;
+                }
+                Switch {
+                    y: (parent.height - self.height) / 2;
+                    label: "Show NSFW";
+                    checked: BrowseState.show-nsfw;
+                    toggled => { BrowseState.toggle-nsfw(); }
+                }
             }
             Text {
                 text: BrowseState.summary;

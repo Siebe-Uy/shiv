@@ -36,6 +36,8 @@ const THUMB_BUDGET: usize = 24 * 1024 * 1024;
 const THUMB_WORKERS: usize = 4;
 /// Pending thumbnail requests; older ones (scrolled past) are dropped first.
 const THUMB_QUEUE: usize = 48;
+/// Blurred NSFW thumbnails kept (about 32 KB each).
+const OBSCURED_KEEP: usize = 128;
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(150);
 const GAMEBANANA_SS: &str = "https://images.gamebanana.com/img/ss/mods/";
 
@@ -257,6 +259,7 @@ struct Entry {
     thumb_url: Option<String>,
     version: Option<String>,
     downloadable: bool,
+    nsfw: bool,
 }
 
 impl Entry {
@@ -280,6 +283,7 @@ impl Entry {
             thumb_url: thumb_url(&m),
             version: m.files_updated_at.or(m.remote_updated_at),
             downloadable: m.downloadable,
+            nsfw: m.is_nsfw,
             byline: byline.into(),
             stats: stats.into(),
             id: m.id,
@@ -313,6 +317,10 @@ struct ModList {
     installed_since: RefCell<HashSet<String>>,
     cache: Arc<thumbs::Cache>,
     loader: ThumbLoader,
+    /// NSFW thumbnails are shown unblurred (off at every start).
+    show_nsfw: Cell<bool>,
+    /// Blurred copies of NSFW thumbnails, by URL.
+    obscured: RefCell<HashMap<String, slint::Image>>,
     notify: ModelNotify,
 }
 
@@ -334,6 +342,42 @@ impl ModList {
     fn changed(&self, id: &str) {
         let idx = self.entries.borrow().iter().position(|e| e.id == id);
         if let Some(i) = idx {
+            self.notify.row_changed(i);
+        }
+    }
+
+    /// The thumbnail as shown: NSFW ones blurred unless the viewer opted in.
+    fn display_thumb(&self, url: &str, img: &thumbs::Image, nsfw: bool) -> Option<slint::Image> {
+        if !nsfw || self.show_nsfw.get() {
+            return Some(to_slint(img));
+        }
+        if let Some(done) = self.obscured.borrow().get(url) {
+            return Some(done.clone());
+        }
+        // No blurred copy means no thumbnail, never the original.
+        let blurred = to_slint(&thumbs::obscured(img)?);
+        let mut kept = self.obscured.borrow_mut();
+        if kept.len() >= OBSCURED_KEEP {
+            kept.clear();
+        }
+        kept.insert(url.to_owned(), blurred.clone());
+        Some(blurred)
+    }
+
+    fn set_show_nsfw(&self, show: bool) {
+        self.show_nsfw.set(show);
+        if show {
+            self.obscured.borrow_mut().clear();
+        }
+        let rows: Vec<usize> = self
+            .entries
+            .borrow()
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.nsfw)
+            .map(|(i, _)| i)
+            .collect();
+        for i in rows {
             self.notify.row_changed(i);
         }
     }
@@ -368,13 +412,16 @@ impl Model for ModList {
             name: e.name.as_str().into(),
             byline: e.byline.clone(),
             stats: e.stats.clone(),
+            nsfw: e.nsfw,
             ..ModRow::default()
         };
         if let Some(url) = &e.thumb_url {
             match self.cache.get(url) {
                 Some(img) => {
-                    out.thumb = to_slint(&img);
-                    out.has_thumb = true;
+                    if let Some(thumb) = self.display_thumb(url, &img, e.nsfw) {
+                        out.thumb = thumb;
+                        out.has_thumb = true;
+                    }
                 }
                 None if !self.cache.has_failed(url) => self.loader.request(url),
                 None => {}
@@ -538,6 +585,8 @@ pub fn attach(app: &App, api_url: &str) -> Arc<thumbs::Cache> {
         installed_since: RefCell::new(HashSet::new()),
         loader: ThumbLoader::start(cache.clone(), weak.clone()),
         cache: cache.clone(),
+        show_nsfw: Cell::new(false),
+        obscured: RefCell::new(HashMap::new()),
         notify: ModelNotify::default(),
     });
     let browse = Rc::new(Browse {
@@ -576,6 +625,13 @@ pub fn attach(app: &App, api_url: &str) -> Arc<thumbs::Cache> {
     state.on_cancel(|id| with_browse(|b| b.cancel(id.as_str())));
     state.on_dismiss_banner(handle(|b| b.set_banner("")));
     state.on_shown(refresh_installed);
+    state.on_toggle_nsfw(|| {
+        with_browse(|b| {
+            let show = !b.list.show_nsfw.get();
+            b.list.set_show_nsfw(show);
+            b.with_state(|s| s.set_show_nsfw(show));
+        });
+    });
 
     browse.load();
     cache
@@ -681,8 +737,8 @@ impl Browse {
             Ok(mods) => mods,
             Err(text) => return self.fail_load(text),
         };
-        // NSFW mods are not listed (no opt-in setting exists yet).
-        let mods: Vec<ModDto> = mods.into_iter().filter(|m| !m.is_nsfw).collect();
+        // NSFW mods are listed with a tag and a blurred thumbnail (see
+        // `ModList::display_thumb`) until the viewer turns on Show NSFW.
         if mods.is_empty() {
             return self.fail_load(
                 "The mod service returned an empty catalog. Try again in a moment.".into(),

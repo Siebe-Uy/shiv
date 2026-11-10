@@ -188,6 +188,30 @@ fn http_get(agent: &ureq::Agent, url: &str) -> Option<Vec<u8>> {
         .ok()
 }
 
+/// Grid the pixels are averaged down to for [`obscured`]: 16x9 cells of 15 px
+/// each at display size, so no shape smaller than a sixth of the frame survives.
+const OBSCURE_W: u32 = 16;
+const OBSCURE_H: u32 = 9;
+/// Size the averaged grid is smoothed back up to (half the display size; the
+/// UI scales it the rest of the way).
+pub const OBSCURED_W: u32 = DISPLAY_W / 2;
+pub const OBSCURED_H: u32 = DISPLAY_H / 2;
+
+/// A heavily blurred copy of `img` for content the viewer has not opted into
+/// (NSFW). The detail is really gone: the pixels are averaged down to a 16x9
+/// grid and smoothed back up, so nothing of the original survives beyond
+/// broad colour fields. About 32 KB, a fraction of a millisecond to make.
+pub fn obscured(img: &Image) -> Option<Image> {
+    let src = image::RgbaImage::from_raw(img.width, img.height, img.rgba.to_vec())?;
+    let small = image::imageops::resize(&src, OBSCURE_W, OBSCURE_H, FilterType::Triangle);
+    let out = image::imageops::resize(&small, OBSCURED_W, OBSCURED_H, FilterType::Triangle);
+    Some(Image {
+        width: OBSCURED_W,
+        height: OBSCURED_H,
+        rgba: Arc::from(out.into_raw()),
+    })
+}
+
 /// Decode and cover-crop to exactly `DISPLAY_W` x `DISPLAY_H`.
 fn decode(bytes: &[u8]) -> Option<Image> {
     let mut reader = image::ImageReader::new(Cursor::new(bytes))
@@ -266,6 +290,51 @@ mod tests {
         assert_eq!((img.width(), img.height()), (DISPLAY_W, DISPLAY_H));
         assert_eq!(img.rgba().len(), THUMB_BYTES);
         assert_eq!(&img.rgba()[..4], &[200, 100, 50, 255]);
+    }
+
+    /// Two pictures with the same colours but different fine detail (a
+    /// one-pixel checkerboard against its inverse, i.e. "text" vs. its
+    /// negative) come out the same: the detail does not survive.
+    #[test]
+    fn obscured_removes_detail() {
+        let make = |invert: bool| {
+            let mut rgba = Vec::with_capacity(THUMB_BYTES);
+            for y in 0..DISPLAY_H {
+                for x in 0..DISPLAY_W {
+                    let on = ((x + y) % 2 == 0) != invert;
+                    let v = if on { 255 } else { 0 };
+                    rgba.extend_from_slice(&[v, v, v, 255]);
+                }
+            }
+            Image {
+                width: DISPLAY_W,
+                height: DISPLAY_H,
+                rgba: Arc::from(rgba),
+            }
+        };
+        let (a, b) = (
+            obscured(&make(false)).unwrap(),
+            obscured(&make(true)).unwrap(),
+        );
+        assert_eq!((a.width(), a.height()), (OBSCURED_W, OBSCURED_H));
+        assert_eq!(a.rgba().len(), (OBSCURED_W * OBSCURED_H * 4) as usize);
+        let max_diff = a
+            .rgba()
+            .iter()
+            .zip(b.rgba())
+            .map(|(x, y)| x.abs_diff(*y))
+            .max()
+            .unwrap();
+        assert!(max_diff <= 4, "detail leaked: {max_diff}");
+        // Mid grey everywhere, not a dimmed copy of the pattern.
+        assert!(a.rgba().chunks(4).all(|p| (120..=136).contains(&p[0])));
+        // A malformed buffer is refused, not a panic.
+        let bad = Image {
+            width: 10,
+            height: 10,
+            rgba: Arc::from(vec![0u8; 3]),
+        };
+        assert!(obscured(&bad).is_none());
     }
 
     #[test]
