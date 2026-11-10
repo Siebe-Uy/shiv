@@ -310,6 +310,22 @@ export component BrowsePage inherits Rectangle {
                 }
             }
 
+            if BrowseState.author-filter != "": HorizontalLayout {
+                spacing: Theme.s1;
+                alignment: start;
+                Text {
+                    text: "Mods by " + BrowseState.author-filter;
+                    color: Theme.text;
+                    font-size: Theme.text-md;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                }
+                TextButton {
+                    text: "Show all mods";
+                    clicked => { BrowseState.author-filter-cleared(); }
+                }
+            }
+
             if BrowseState.banner-text != "": Rectangle {
                 border-radius: Theme.radius;
                 border-width: 1px;

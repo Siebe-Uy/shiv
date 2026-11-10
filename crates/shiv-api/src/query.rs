@@ -25,6 +25,8 @@ pub struct ModQuery {
     /// Case-insensitive exact hero match; a mod passes when its hero is any
     /// of these. Empty means no hero filter.
     pub heroes: Vec<String>,
+    /// Only mods by this author (`ModDto::mod_author_id`).
+    pub author_id: Option<String>,
     /// Zero-based page index.
     pub page: usize,
     /// Items per page; 0 is treated as 1.
@@ -38,6 +40,7 @@ impl Default for ModQuery {
             sort: SortKey::default(),
             category: None,
             heroes: Vec::new(),
+            author_id: None,
             page: 0,
             page_size: 50,
         }
@@ -82,6 +85,11 @@ pub fn apply_query(mods: &[ModDto], q: &ModQuery) -> ModPage {
             })
         })
         .filter(|m| {
+            q.author_id
+                .as_deref()
+                .is_none_or(|a| m.mod_author_id.as_deref() == Some(a))
+        })
+        .filter(|m| {
             heroes.is_empty()
                 || m.hero
                     .as_deref()
@@ -119,6 +127,26 @@ pub fn apply_query(mods: &[ModDto], q: &ModQuery) -> ModPage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn author_filter_keeps_only_that_authors_mods() {
+        let by = |name: &str, a: Option<&str>| ModDto {
+            name: name.into(),
+            mod_author_id: a.map(str::to_owned),
+            ..ModDto::default()
+        };
+        let mods = [by("a", Some("x")), by("b", Some("y")), by("c", None)];
+        let q = ModQuery {
+            author_id: Some("x".into()),
+            ..ModQuery::default()
+        };
+        let names: Vec<_> = apply_query(&mods, &q)
+            .items
+            .into_iter()
+            .map(|m| m.name)
+            .collect();
+        assert_eq!(names, ["a"]);
+    }
 
     #[test]
     fn hero_filter_matches_any_selected_hero_case_insensitively() {

@@ -176,13 +176,48 @@ export component ModDetailPage inherits Rectangle {
                         }
                         Rectangle { horizontal-stretch: 1; }
                     }
-                    if BrowseState.detail.author != "" || BrowseState.detail.kind != "": Text {
+                    if BrowseState.detail.author-id == "" && (BrowseState.detail.author != "" || BrowseState.detail.kind != ""): Text {
                         text: BrowseState.detail.author != ""
                             ? (BrowseState.detail.kind != "" ? "by " + BrowseState.detail.author + " \u{b7} " + BrowseState.detail.kind : "by " + BrowseState.detail.author)
                             : BrowseState.detail.kind;
                         color: Theme.text-muted;
                         font-size: Theme.text-md;
                         wrap: word-wrap;
+                    }
+                    // With an author page: the name is a link to their mods.
+                    if BrowseState.detail.author-id != "": HorizontalLayout {
+                        spacing: Theme.s1;
+                        alignment: start;
+                        Text {
+                            text: "by";
+                            color: Theme.text-muted;
+                            font-size: Theme.text-md;
+                            vertical-alignment: center;
+                        }
+                        author-link := Rectangle {
+                            height: Theme.control-h;
+                            min-width: author-text.preferred-width;
+                            accessible-role: button;
+                            accessible-label: "Show all mods by " + BrowseState.detail.author;
+                            accessible-action-default => { BrowseState.author-selected(); }
+                            author-text := Text {
+                                text: BrowseState.detail.author;
+                                color: author-ta.has-hover ? Theme.text : Theme.accent;
+                                font-size: Theme.text-md;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+                            author-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { BrowseState.author-selected(); }
+                            }
+                        }
+                        if BrowseState.detail.kind != "": Text {
+                            text: "\u{b7} " + BrowseState.detail.kind;
+                            color: Theme.text-muted;
+                            font-size: Theme.text-md;
+                            vertical-alignment: center;
+                        }
                     }
                 }
 
@@ -290,6 +325,14 @@ export component ModDetailPage inherits Rectangle {
                             Button {
                                 text: "Open on GameBanana";
                                 clicked => { BrowseState.open-link(); }
+                            }
+                        }
+
+                        if BrowseState.detail.donation-label != "": HorizontalLayout {
+                            alignment: start;
+                            Button {
+                                text: BrowseState.detail.donation-label;
+                                clicked => { BrowseState.open-donation(); }
                             }
                         }
                     }

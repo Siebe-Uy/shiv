@@ -301,6 +301,22 @@ fn detail_info_at(m: &ModDto, now: i64) -> ModDetail {
             .as_deref()
             .is_some_and(shiv_core::link::is_web_link),
         nsfw: m.is_nsfw,
+        author_id: match (non_empty(&m.author), non_empty(&m.mod_author_id)) {
+            (Some(_), Some(id)) => id.into(),
+            _ => Default::default(),
+        },
+        donation_label: m
+            .donation_link()
+            .map(|(platform, _)| support_label(platform).into())
+            .unwrap_or_default(),
+    }
+}
+
+/// Button text for a support page: "Support on Ko-fi".
+fn support_label(platform: &str) -> String {
+    match platform {
+        "Support the author" => platform.to_owned(),
+        p => format!("Support on {p}"),
     }
 }
 
@@ -915,6 +931,8 @@ struct Detail {
     index: usize,
     /// The mod's page, when it is an https link.
     link: Option<String>,
+    /// The author's support page, when it is on a known host.
+    donation: Option<String>,
     /// Strip thumbnails, one per image.
     thumbs: Rc<VecModel<GalleryThumb>>,
     /// Blurred large images (NSFW with Show NSFW off), by URL.
@@ -1006,6 +1024,9 @@ pub fn attach(app: &App, api_url: &str) -> Arc<thumbs::Cache> {
     state.on_search_edited(|text| with_browse(|b| b.search_edited(text.as_str())));
     state.on_sort_selected(|i| with_browse(|b| b.sort_selected(i)));
     state.on_category_selected(|i| with_browse(|b| b.category_selected(i)));
+    state.on_author_selected(|| with_browse(|b| b.author_selected()));
+    state.on_author_filter_cleared(|| with_browse(|b| b.author_filter_cleared()));
+    state.on_open_donation(|| with_browse(|b| b.open_donation()));
     state.on_hero_toggled(|i| with_browse(|b| b.hero_toggled(i)));
     state.on_heroes_cleared(|| with_browse(|b| b.heroes_cleared()));
     state.on_retry(handle(|b| b.load()));
@@ -1556,6 +1577,7 @@ impl Browse {
                 .remote_url
                 .clone()
                 .filter(|u| shiv_core::link::is_web_link(u)),
+            donation: m.donation_link().map(|(_, url)| url.to_owned()),
             thumbs: thumbs.clone(),
             obscured: HashMap::new(),
         });
@@ -1767,8 +1789,52 @@ impl Browse {
         self.show_image(index);
     }
 
+    /// Limit the list to the open mod's author and leave the detail page.
+    fn author_selected(&self) {
+        let (id, name) = {
+            let detail = self.list.detail.borrow();
+            let Some(entry) = detail.as_ref() else { return };
+            let catalog = self.catalog.borrow();
+            let Some(m) = catalog.iter().find(|m| m.id == entry.id) else {
+                return;
+            };
+            let (Some(id), Some(name)) = (m.mod_author_id.clone(), m.author.clone()) else {
+                return;
+            };
+            (id, name)
+        };
+        self.query.borrow_mut().author_id = Some(id);
+        self.with_state(|s| {
+            s.set_author_filter(name.as_str().into());
+            s.set_return_screen(-1);
+        });
+        self.close_detail();
+        self.refresh();
+    }
+
+    fn author_filter_cleared(&self) {
+        self.query.borrow_mut().author_id = None;
+        self.with_state(|s| s.set_author_filter("".into()));
+        self.refresh();
+    }
+
     fn open_link(&self) {
-        let Some(url) = self.detail.borrow().as_ref().and_then(|d| d.link.clone()) else {
+        let url = self.detail.borrow().as_ref().and_then(|d| d.link.clone());
+        self.open_external(url);
+    }
+
+    fn open_donation(&self) {
+        let url = self
+            .detail
+            .borrow()
+            .as_ref()
+            .and_then(|d| d.donation.clone());
+        self.open_external(url);
+    }
+
+    /// Open a vetted https link in the system browser, off the UI thread.
+    fn open_external(&self, url: Option<String>) {
+        let Some(url) = url else {
             return;
         };
         let opener = self.opener.borrow().clone();

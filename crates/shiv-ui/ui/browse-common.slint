@@ -39,6 +39,10 @@ export struct ModDetail {
     id: string,
     name: string,
     author: string,
+    // The author's catalog id, "" when unknown (no author page then).
+    author-id: string,
+    // "Support on Ko-fi", "" when the author offers no known support page.
+    donation-label: string,
     // "Skins · Haze": category and hero, either may be missing.
     kind: string,
     // Comma-separated, "" for none.
@@ -79,6 +83,8 @@ export global BrowseState {
     // Heroes in the catalog, for the multi-select filter, and its button text.
     in property <[HeroOption]> heroes;
     in property <string> heroes-label: "All heroes";
+    // Name of the author whose mods the list is limited to, "" for all.
+    in property <string> author-filter;
     in-out property <int> sort-index: 0;
     in-out property <int> category-index: 0;
     // The list's scroll offset, kept while the detail page is open.
@@ -108,6 +114,10 @@ export global BrowseState {
     callback sort-selected(int);
     callback category-selected(int);
     callback hero-toggled(int);
+    // Show only the open mod's author's mods.
+    callback author-selected();
+    callback author-filter-cleared();
+    callback open-donation();
     callback heroes-cleared();
     callback retry();
     callback install(string);

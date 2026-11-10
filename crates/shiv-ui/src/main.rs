@@ -1713,7 +1713,8 @@ mod tests {
         let mut mods = vec![
             format!(
                 r#"{{"id":"m5","remoteId":"5","name":"Gallery Mod","downloadable":true,
-                "author":"Ada","category":"Skins","hero":"Haze","tags":["Sound"," ","Funny"],
+                "author":"Ada","modAuthorId":"auth1","category":"Skins","hero":"Haze",
+                "metadata":{{"donationLinks":[{{"url":"https://ko-fi.com/ada","platform":"Ko-fi"}}]}},"tags":["Sound"," ","Funny"],
                 "likes":56,"downloadCount":1234,"remoteUrl":"https://gamebanana.com/mods/5",
                 "remoteAddedAt":"2026-10-01T10:00:00Z","remoteUpdatedAt":"2026-11-05T09:00:00Z",
                 "description":"<b>Hello</b> &amp; welcome.<br><br><ul><li>One</li><li>Two</li></ul><script>x()</script><a href=\"https://evil.test\">link</a>",
@@ -1826,6 +1827,20 @@ mod tests {
         assert_eq!(app.get_screen(), 2);
         assert_eq!(state.get_return_screen(), -1);
         app.set_screen(0);
+
+        // The author's page: Ada's mods only, then back to everything.
+        assert!(browse::show_detail_from("m5", 2));
+        let d = state.get_detail();
+        assert_eq!(d.author_id.as_str(), "auth1");
+        assert_eq!(d.donation_label.as_str(), "Support on Ko-fi");
+        state.invoke_author_selected();
+        assert!(!state.get_detail_open());
+        assert_eq!(app.get_screen(), 0);
+        assert_eq!(state.get_author_filter().as_str(), "Ada");
+        assert_eq!(state.get_summary().as_str(), "1 of 32 mods");
+        state.invoke_author_filter_cleared();
+        assert_eq!(state.get_author_filter().as_str(), "");
+        assert_eq!(state.get_summary().as_str(), "32 mods");
 
         // The gallery mod, opened with a real click on its row.
         state.invoke_search_edited("gallery".into());
