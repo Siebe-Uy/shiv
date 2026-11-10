@@ -371,7 +371,7 @@ export component RepairDialog inherits Rectangle {
             }
             Text {
                 text: root.undo
-                    ? "Shiv puts the repair package and gameinfo.gi back the way they were before the last repair, from the backup it made then. Your mod files are not touched."
+                    ? "Shiv puts the repair package back the way it was before the last repair, from the backup it made then, and undoes only its own line in gameinfo.gi. Other changes to gameinfo.gi (Performance settings, game updates) stay. Your mod files are not touched."
                     : "Shiv first backs up the files it replaces, so you can undo this. It then writes a repair package to game/citadel/shiv_repair and adds it to gameinfo.gi. Your mod files are not modified.";
                 color: Theme.text-muted;
                 font-size: Theme.text-md;

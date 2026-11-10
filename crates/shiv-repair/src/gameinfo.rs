@@ -11,7 +11,7 @@
 //! in the file changes.
 
 use crate::error::RepairError;
-use kv_parser::{ParseOptions, SourceDocument, SourceKind, SourceSite, line_start};
+use kv_parser::{ParseOptions, SourceDocument, SourceKind, SourceSite, line_end, line_start};
 use shiv_core::health::{ADDONS_SEARCH_PATH, client_symbol};
 
 /// Folder under `game/citadel` that holds the repair package.
@@ -109,6 +109,57 @@ pub fn with_overlay(text: &str) -> Result<Option<String>, RepairError> {
     Ok(Some(out))
 }
 
+/// `text` without the repair package's `Game citadel/shiv_repair` mount, or
+/// `None` when it has none. The reverse of [`with_overlay`]: a line holding
+/// only the mount is removed with its line ending; a mount sharing its line
+/// with other tokens loses just its key, value and the space after them.
+/// Everything else (comments, other entries, line endings, a BOM) stays as it
+/// is. Conditional entries (`[$...]`) are left alone: Shiv never writes them.
+pub fn without_overlay(text: &str) -> Result<Option<String>, RepairError> {
+    let doc = parse(text)?;
+    let mut cuts: Vec<std::ops::Range<usize>> = Vec::new();
+    for site in &doc.sites {
+        if !site.is_unconditional() {
+            continue;
+        }
+        let Some(path) = active_game_path(site)? else {
+            continue;
+        };
+        if !path.eq_ignore_ascii_case(OVERLAY_SEARCH_PATH) {
+            continue;
+        }
+        let SourceKind::Scalar { value_range, .. } = &site.kind else {
+            continue;
+        };
+        let start = line_start(text, site.key_start);
+        let end = line_end(text, value_range.end);
+        let before = &text[start..site.key_start];
+        let after = &text[value_range.end..end];
+        if before.chars().all(char::is_whitespace) && after.trim().is_empty() {
+            cuts.push(start..end);
+        } else {
+            let rest = &text[value_range.end..];
+            let spaces = rest.len() - rest.trim_start_matches([' ', '\t']).len();
+            cuts.push(site.key_start..value_range.end + spaces);
+        }
+    }
+    if cuts.is_empty() {
+        return Ok(None);
+    }
+    cuts.sort_by_key(|cut| cut.start);
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    for cut in cuts {
+        if cut.start < at {
+            continue;
+        }
+        out.push_str(&text[at..cut.start]);
+        at = cut.end;
+    }
+    out.push_str(&text[at..]);
+    Ok(Some(out))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,6 +190,34 @@ mod tests {
             "GameInfo { FileSystem { SearchPaths { Game citadel/addons [$LINUX] Game citadel/shiv_repair Game citadel/addons Game core } } }"
         );
         assert!(mounts_overlay(&edited).unwrap());
+    }
+
+    #[test]
+    fn without_overlay_reverses_with_overlay_byte_for_byte() {
+        let bom = format!("\u{feff}{STOCK}");
+        let lf = STOCK.replace("\r\n", "\n");
+        for text in [STOCK, bom.as_str(), lf.as_str()] {
+            let mounted = with_overlay(text).unwrap().unwrap();
+            assert_eq!(without_overlay(&mounted).unwrap().as_deref(), Some(text));
+            assert_eq!(without_overlay(text).unwrap(), None);
+        }
+        let one_line = "GameInfo { FileSystem { SearchPaths { Game citadel/addons Game core } } }";
+        let mounted = with_overlay(one_line).unwrap().unwrap();
+        assert_eq!(
+            without_overlay(&mounted).unwrap().as_deref(),
+            Some(one_line)
+        );
+    }
+
+    #[test]
+    fn without_overlay_keeps_everything_else() {
+        // Edited elsewhere after the mount: a comment, a ConVar, a moved line.
+        let text = "\"GameInfo\"\n{\n\t// mine\n\tFileSystem\n\t{\n\t\tSearchPaths\n\t\t{\n\t\t\tGame citadel/shiv_repair\n\t\t\tGame citadel/addons // keep\n\t\t\tGame core\n\t\t}\n\t}\n\tConVars { fps_max 240 }\n}\n";
+        let expected = text.replace("\t\t\tGame citadel/shiv_repair\n", "");
+        assert_eq!(without_overlay(text).unwrap(), Some(expected));
+        // A conditional entry was not written by Shiv and stays.
+        let conditional = "GameInfo { FileSystem { SearchPaths { Game citadel/shiv_repair [$LINUX] Game core } } }";
+        assert_eq!(without_overlay(conditional).unwrap(), None);
     }
 
     #[test]

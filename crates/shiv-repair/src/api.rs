@@ -36,7 +36,9 @@ use crate::mod_health::{
     self, CompatibilityChoice, FixModsStatus, ModFindings, ModHealthSource, ModHealthStatus,
     ModHealthSymptom,
 };
-use crate::repair_backup::{create_backup_set, latest_backup_set, restore_backup_set};
+use crate::repair_backup::{
+    create_backup_set, latest_backup_set, restore_backup_set, restore_backup_set_except, saved_file,
+};
 use crate::vdata_history::{BaselineStatus, VdataHistoryIndex};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -907,9 +909,13 @@ pub fn can_undo(paths: &GamePaths) -> bool {
     latest_backup_set(&backup_dir(paths)).is_ok_and(|backup| backup.is_some())
 }
 
-/// Undo the last [`apply`]: puts back the package, receipt, learned data and
-/// `gameinfo.gi` exactly as they were before it, and removes files it created.
-/// Refuses while the game runs.
+/// Undo the last [`apply`] (or [`remove_package`]): puts back the package,
+/// receipt and learned data exactly as they were before it, and removes files
+/// it created. `gameinfo.gi` is not put back whole, since Performance or a
+/// game update may have rewritten it since: only the repair mount is undone,
+/// i.e. the `Game citadel/shiv_repair` line is removed again (or added back
+/// after [`remove_package`]) in the current file, and nothing else in it
+/// changes. Refuses while the game runs.
 pub fn restore_last(paths: &GamePaths) -> Result<RestoreReport, RepairError> {
     restore_last_with(paths, game::is_running)
 }
@@ -928,7 +934,22 @@ pub fn restore_last_with(
             "There is no repair to undo".to_owned(),
         ));
     };
-    let outcome = restore_backup_set(&backup)?;
+    // Worked out before anything is written.
+    let gameinfo = undo_mount(paths, &backup)?;
+    let mut restored = Vec::new();
+    if let Some((text, modified)) = gameinfo {
+        rewrite_gameinfo(paths, &text)?;
+        if let Some(modified) = modified {
+            // Byte-identical to the file before the repair: keep its timestamp too.
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&paths.gameinfo)?
+                .set_modified(modified)?;
+        }
+        restored.push(paths.gameinfo.clone());
+    }
+    let outcome = restore_backup_set_except(&backup, &[paths.gameinfo.as_path()])?;
+    restored.extend(outcome.restored);
     let consumed = root.join(format!("restored-{}", file_name(&backup)));
     let backup = match fs::rename(&backup, &consumed) {
         Ok(()) => consumed,
@@ -940,8 +961,169 @@ pub fn restore_last_with(
     };
     Ok(RestoreReport {
         backup,
-        restored: outcome.restored,
+        restored,
         removed: outcome.removed,
+    })
+}
+
+/// The `gameinfo.gi` text that undoes `backup`'s mount change, or `None` when
+/// nothing needs to change: the set holds no copy of `gameinfo.gi`, the file
+/// is gone, or it already mounts the package exactly when the saved copy did.
+/// The second value is the saved copy's timestamp when the new text is
+/// byte-identical to it.
+fn undo_mount(
+    paths: &GamePaths,
+    backup: &Path,
+) -> Result<Option<(String, Option<SystemTime>)>, RepairError> {
+    let Some(saved) = saved_file(backup, &paths.gameinfo)? else {
+        return Ok(None);
+    };
+    let Some(saved_bytes) = saved.bytes.as_deref() else {
+        return Ok(None);
+    };
+    let current = match fs::read_to_string(&paths.gameinfo) {
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let saved_mounts = std::str::from_utf8(saved_bytes)
+        .ok()
+        .and_then(|text| gameinfo::mounts_overlay(text).ok())
+        .unwrap_or(false);
+    let text = if saved_mounts {
+        // Mods no longer load (no addons mount): there is nothing to re-mount for.
+        gameinfo::with_overlay(&current).unwrap_or_else(|error| {
+            log::warn!("Not mounting the repair package again: {error}");
+            None
+        })
+    } else {
+        gameinfo::without_overlay(&current)?
+    };
+    Ok(text.map(|text| {
+        let modified = saved.modified.filter(|_| text.as_bytes() == saved_bytes);
+        (text, modified)
+    }))
+}
+
+/// Replace `gameinfo.gi` with `text`, keeping its permissions; the file as it
+/// was goes to `gameinfo.gi.bak` first (the rolling backup Performance keeps).
+fn rewrite_gameinfo(paths: &GamePaths, text: &str) -> Result<(), RepairError> {
+    let current = fs::read(&paths.gameinfo)?;
+    let permissions = fs::metadata(&paths.gameinfo)?.permissions();
+    let mut bak = paths.gameinfo.clone().into_os_string();
+    bak.push(".bak");
+    write_atomic(Path::new(&bak), &current, Some(permissions.clone()))?;
+    write_atomic(&paths.gameinfo, text.as_bytes(), Some(permissions))
+}
+
+/// What [`remove_package`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoveReport {
+    /// Backup set of everything removed or changed; [`restore_last`] puts it back.
+    pub backup: PathBuf,
+    /// Files deleted from the package folder.
+    pub removed: Vec<PathBuf>,
+    /// `gameinfo.gi` lost its `Game citadel/shiv_repair` line.
+    pub gameinfo_changed: bool,
+}
+
+/// Whether a repair package is on disk or mounted by `gameinfo.gi`.
+pub fn has_package(paths: &GamePaths) -> bool {
+    overlay_dir(paths).join(OVERLAY_VPK_NAME).is_file() || mounts_overlay(paths)
+}
+
+/// Remove the repair package entirely, whatever the mods' state: drops the
+/// `Game citadel/shiv_repair` line from `gameinfo.gi` (nothing else in it
+/// changes) and deletes the package folder with its receipt and learned data.
+/// Everything removed is backed up first with [`create_backup_set`], so
+/// [`restore_last`] can put it back; a failed write restores that set.
+/// Refuses while the game runs.
+pub fn remove_package(paths: &GamePaths) -> Result<RemoveReport, RepairError> {
+    remove_package_with(paths, game::is_running)
+}
+
+/// [`remove_package`] with an injectable running-game check.
+pub fn remove_package_with(
+    paths: &GamePaths,
+    game_running: impl Fn() -> bool,
+) -> Result<RemoveReport, RepairError> {
+    if game_running() {
+        return Err(RepairError::GameRunning);
+    }
+    let dir = overlay_dir(paths);
+    let mut files: Vec<String> = Vec::new();
+    match fs::read_dir(&dir) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry?;
+                if entry.file_type()?.is_file() {
+                    files.push(entry.file_name().to_string_lossy().into_owned());
+                }
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    files.sort();
+    let new_gameinfo = match fs::read_to_string(&paths.gameinfo) {
+        Ok(text) => gameinfo::without_overlay(&text)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    if files.is_empty() && new_gameinfo.is_none() {
+        return Err(RepairError::InvalidInput(
+            "There is no repair package to remove".to_owned(),
+        ));
+    }
+
+    let gameinfo_name = file_name(&paths.gameinfo);
+    let citadel = citadel(paths);
+    let gameinfo_dir = paths.gameinfo.parent().unwrap_or(&citadel);
+    let mut targets: Vec<(&Path, &str)> =
+        files.iter().map(|f| (dir.as_path(), f.as_str())).collect();
+    if new_gameinfo.is_some() {
+        targets.push((gameinfo_dir, &gameinfo_name));
+    }
+    let backup = create_backup_set(&backup_dir(paths), &targets, &[])?;
+
+    let gameinfo_changed = new_gameinfo.is_some();
+    let mut removed = Vec::new();
+    let mut write = || -> Result<(), RepairError> {
+        // Unmount first, so the game never mounts a half-removed folder.
+        if let Some(text) = &new_gameinfo {
+            rewrite_gameinfo(paths, text)?;
+        }
+        for file in &files {
+            let path = dir.join(file);
+            remove_if_exists(&path)?;
+            removed.push(path);
+        }
+        if !files.is_empty()
+            && let Err(error) = fs::remove_dir(&dir)
+        {
+            // Something Shiv did not put there (a folder) keeps it.
+            log::warn!("Could not remove {}: {error}", dir.display());
+        }
+        Ok(())
+    };
+    if let Err(error) = write() {
+        match restore_backup_set(&backup) {
+            Ok(_) => {
+                if let Err(cleanup) = fs::remove_dir_all(&backup) {
+                    log::warn!("Could not remove the rolled-back backup: {cleanup}");
+                }
+            }
+            Err(rollback) => log::error!(
+                "Removing the repair package failed ({error}) and rolling back failed ({rollback}); the previous files are in {}",
+                backup.display()
+            ),
+        }
+        return Err(error);
+    }
+    Ok(RemoveReport {
+        backup,
+        removed,
+        gameinfo_changed,
     })
 }
 
@@ -1223,6 +1405,11 @@ mod tests {
         let report = restore_last_with(&fx.paths, || false).unwrap();
         assert!(report.restored.contains(&fx.paths.gameinfo), "{report:?}");
         assert!(report.removed.contains(&fx.overlay()), "{report:?}");
+        // Everything is as before, plus the rolling backup of the file as Undo
+        // found it.
+        let bak = fx.citadel().join("gameinfo.gi.bak");
+        assert!(crate::gameinfo::mounts_overlay(&fs::read_to_string(&bak).unwrap()).unwrap());
+        fs::remove_file(bak).unwrap();
         assert_eq!(snapshot_except(&fx.paths.root, Some(&backups)), before);
         assert_eq!(only(&analyze(&fx.paths, 100)).status, RepairStatus::Fixable);
 
@@ -1232,6 +1419,149 @@ mod tests {
             restore_last_with(&fx.paths, || false),
             Err(RepairError::BackupRestoreFailed(_))
         ));
+    }
+
+    /// A Performance-style edit after the repair, elsewhere in the file.
+    fn edit_convars(text: &str) -> String {
+        text.replace(
+            "\tgame \"Deadlock\"\n",
+            "\tgame \"Deadlock\"\n\tConVars\n\t{\n\t\tfps_max 240 // perf\n\t}\n",
+        )
+    }
+
+    #[test]
+    fn undo_keeps_settings_changed_after_the_repair() {
+        let fx = fixture();
+        apply_with(&fx.paths, &["data".into()], || false).unwrap();
+        let mounted = fs::read_to_string(&fx.paths.gameinfo).unwrap();
+        let tuned = edit_convars(&mounted);
+        assert_ne!(tuned, mounted);
+        fs::write(&fx.paths.gameinfo, &tuned).unwrap();
+
+        restore_last_with(&fx.paths, || false).unwrap();
+        let after = fs::read_to_string(&fx.paths.gameinfo).unwrap();
+        // Only the mount line went; the later setting survives.
+        assert_eq!(after, edit_convars(GAMEINFO));
+        assert!(!crate::gameinfo::mounts_overlay(&after).unwrap());
+        assert!(!fx.overlay().exists());
+        assert_eq!(
+            fs::read_to_string(fx.citadel().join("gameinfo.gi.bak")).unwrap(),
+            tuned
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn undo_after_a_game_update_removes_only_the_mount_line() {
+        use std::os::unix::fs::PermissionsExt;
+        let fx = fixture();
+        apply_with(&fx.paths, &["data".into()], || false).unwrap();
+        // The update rewrote the file (CRLF, a new entry) and kept the mount.
+        let updated = fs::read_to_string(&fx.paths.gameinfo)
+            .unwrap()
+            .replace(
+                "\t\t\tGame                core\n",
+                "\t\t\tGame                core\n\t\t\tGame                citadel_new\n",
+            )
+            .replace('\n', "\r\n");
+        fs::write(&fx.paths.gameinfo, &updated).unwrap();
+        fs::set_permissions(&fx.paths.gameinfo, fs::Permissions::from_mode(0o640)).unwrap();
+
+        restore_last_with(&fx.paths, || false).unwrap();
+        let after = fs::read_to_string(&fx.paths.gameinfo).unwrap();
+        assert_eq!(
+            after,
+            updated.replace("\t\t\tGame                citadel/shiv_repair\r\n", "")
+        );
+        assert!(after.contains("citadel_new"));
+        let mode = fs::metadata(&fx.paths.gameinfo)
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o640);
+    }
+
+    #[test]
+    fn undo_leaves_a_file_without_the_mount_untouched() {
+        let fx = fixture();
+        apply_with(&fx.paths, &["data".into()], || false).unwrap();
+        // A game update replaced gameinfo.gi and dropped the mount.
+        let replaced = edit_convars(GAMEINFO);
+        fs::write(&fx.paths.gameinfo, &replaced).unwrap();
+        let modified = fs::metadata(&fx.paths.gameinfo)
+            .unwrap()
+            .modified()
+            .unwrap();
+
+        let report = restore_last_with(&fx.paths, || false).unwrap();
+        assert!(!report.restored.contains(&fx.paths.gameinfo), "{report:?}");
+        assert_eq!(fs::read_to_string(&fx.paths.gameinfo).unwrap(), replaced);
+        assert_eq!(
+            fs::metadata(&fx.paths.gameinfo)
+                .unwrap()
+                .modified()
+                .unwrap(),
+            modified
+        );
+        assert!(!fx.citadel().join("gameinfo.gi.bak").exists());
+        assert!(!fx.overlay().exists());
+    }
+
+    #[test]
+    fn remove_package_unmounts_deletes_and_can_be_undone() {
+        let fx = fixture();
+        let dir = fx.citadel().join("shiv_repair");
+        assert!(!has_package(&fx.paths));
+        assert!(matches!(
+            remove_package_with(&fx.paths, || false),
+            Err(RepairError::InvalidInput(_))
+        ));
+        apply_with(&fx.paths, &["data".into()], || false).unwrap();
+        assert!(has_package(&fx.paths));
+        // A Performance edit after the repair stays through remove and undo.
+        let tuned = edit_convars(&fs::read_to_string(&fx.paths.gameinfo).unwrap());
+        fs::write(&fx.paths.gameinfo, &tuned).unwrap();
+        let package = fs::read(fx.overlay()).unwrap();
+
+        let before = snapshot(&fx.paths.root);
+        assert!(matches!(
+            remove_package_with(&fx.paths, || true),
+            Err(RepairError::GameRunning)
+        ));
+        assert_eq!(snapshot(&fx.paths.root), before);
+
+        let report = remove_package_with(&fx.paths, || false).unwrap();
+        assert!(report.gameinfo_changed);
+        assert!(report.removed.contains(&fx.overlay()), "{report:?}");
+        assert!(!dir.exists());
+        assert!(!has_package(&fx.paths));
+        assert_eq!(overlay_state(&fx.paths), OverlayState::Absent);
+        assert_eq!(
+            fs::read_to_string(&fx.paths.gameinfo).unwrap(),
+            edit_convars(GAMEINFO)
+        );
+        assert_eq!(
+            fs::read(report.backup.join("files").join("pak01_dir.vpk")).unwrap(),
+            package
+        );
+        assert_eq!(only(&analyze(&fx.paths, 100)).status, RepairStatus::Fixable);
+
+        // Undo puts the package back and mounts it again, keeping the edit.
+        restore_last_with(&fx.paths, || false).unwrap();
+        assert_eq!(fs::read(fx.overlay()).unwrap(), package);
+        assert_eq!(fs::read_to_string(&fx.paths.gameinfo).unwrap(), tuned);
+        assert_eq!(only(&analyze(&fx.paths, 100)).status, RepairStatus::Fixed);
+    }
+
+    #[test]
+    fn remove_package_also_drops_a_mount_without_a_package() {
+        let fx = fixture();
+        let mounted = crate::gameinfo::with_overlay(GAMEINFO).unwrap().unwrap();
+        fs::write(&fx.paths.gameinfo, mounted).unwrap();
+        assert!(has_package(&fx.paths));
+        let report = remove_package_with(&fx.paths, || false).unwrap();
+        assert!(report.gameinfo_changed && report.removed.is_empty());
+        assert_eq!(fs::read_to_string(&fx.paths.gameinfo).unwrap(), GAMEINFO);
     }
 
     #[test]

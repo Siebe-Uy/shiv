@@ -16,7 +16,8 @@ pub mod repair_backup;
 pub mod vdata_history;
 
 pub use api::{
-    FixReport, ModHealth, ModId, OverlayState, RepairStatus, RestoreReport, analyze, apply,
-    apply_with, can_undo, game_build, overlay_dir, overlay_state, restore_last, restore_last_with,
+    FixReport, ModHealth, ModId, OverlayState, RemoveReport, RepairStatus, RestoreReport, analyze,
+    apply, apply_with, can_undo, game_build, has_package, overlay_dir, overlay_state,
+    remove_package, remove_package_with, restore_last, restore_last_with,
 };
 pub use error::RepairError;

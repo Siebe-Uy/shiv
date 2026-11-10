@@ -184,6 +184,45 @@ pub struct RestoreOutcome {
 /// replaces anything, and each replacement is a rename. Restored files get
 /// their original modification time.
 pub fn restore_backup_set(backup: &Path) -> Result<RestoreOutcome, Error> {
+    restore_backup_set_except(backup, &[])
+}
+
+/// A file as a [`create_backup_set`] backup recorded it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedFile {
+    /// Where the file belongs.
+    pub path: PathBuf,
+    /// Its bytes when the backup was taken; `None` when it did not exist.
+    pub bytes: Option<Vec<u8>>,
+    pub modified: Option<SystemTime>,
+}
+
+/// The backed-up copy of `path` in `backup`, or `None` when the set does not
+/// list it.
+pub fn saved_file(backup: &Path, path: &Path) -> Result<Option<SavedFile>, Error> {
+    let index = read_index(backup)?;
+    for entry in &index.entries {
+        let name = bare_file_name(&entry.name)?;
+        if entry.target.join(name) != path {
+            continue;
+        }
+        let bytes = if entry.existed {
+            Some(fs::read(backup.join("files").join(name))?)
+        } else {
+            None
+        };
+        return Ok(Some(SavedFile {
+            path: path.to_path_buf(),
+            bytes,
+            modified: entry.modified,
+        }));
+    }
+    Ok(None)
+}
+
+/// [`restore_backup_set`] for every file except those at `skip`, which the
+/// caller restores in its own way.
+pub fn restore_backup_set_except(backup: &Path, skip: &[&Path]) -> Result<RestoreOutcome, Error> {
     let index = read_index(backup)?;
     if index.version < INDEX_VERSION || index.entries.is_empty() {
         return Err(Error::BackupRestoreFailed(format!(
@@ -197,6 +236,9 @@ pub fn restore_backup_set(backup: &Path) -> Result<RestoreOutcome, Error> {
     for entry in &index.entries {
         let name = bare_file_name(&entry.name)?;
         let destination = entry.target.join(name);
+        if skip.contains(&destination.as_path()) {
+            continue;
+        }
         if !entry.existed {
             if destination.exists() {
                 removals.push(destination);
