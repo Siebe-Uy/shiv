@@ -48,7 +48,8 @@ updater complexity, telemetry, i18n at launch.
   - Mod folder health check, also run before launching the game, with a
     warning shown if something is wrong.
   - VPK content repair for mods that break after game updates.
-- Performance: five presets (pretty, balanced, lean, sweaty, potato) plus
+- Performance: four presets (pretty, balanced, sweaty, potato; the catalog
+  has no lean preset, so that tier was dropped on 2026-11-10) plus
   per-setting editing, using the API's perf catalog, written to the game's
   `GameInfo` file.
 - Crosshair: a live preview and an apply step, producing the
@@ -89,8 +90,16 @@ updater complexity, telemetry, i18n at launch.
 - **Launch:** the app has a Launch button (Steam URI). It runs the health
   check first and shows a warning with a "launch anyway" option. It does not
   block permanently. Edits to `addons` are refused while the game runs.
+  After the link is opened the status says Launching until a Deadlock
+  process appears, then Running until it exits; with no process after a
+  timeout it says the launch could not be confirmed. Cancel launch stops
+  waiting and stops the URI opener if it still runs; a launch Steam already
+  accepted cannot be taken back, and the status says so.
 - **Browse:** search, sort, category filter, pagination, thumbnails, and
-  description from the existing v2 API. API changes are out of scope unless
+  description from the existing v2 API. Rows show the last updated date
+  (GameBanana update, else files update). NSFW mods are listed with a tag and
+  a blurred thumbnail until Show NSFW is switched on (off every session).
+  Install asks which file to use when a mod has more than one download. API changes are out of scope unless
   the builder finds a blocker. Online only, no offline mode.
 - **Crosshair:** apply path and controls follow the current app's behaviour
   (full parity with `config-generator.ts`); no community crosshair browser.
