@@ -22,8 +22,8 @@ use slint::{
 
 use crate::thumbs;
 use crate::{
-    App, BrowseState, DownloadRow, GalleryThumb, ImageState, InstallState, LoadState, ModDetail,
-    ModRow,
+    App, BrowseState, DownloadRow, GalleryThumb, HeroOption, ImageState, InstallState, LoadState,
+    ModDetail, ModRow,
 };
 
 const SORTS: [(&str, SortKey); 5] = [
@@ -34,6 +34,7 @@ const SORTS: [(&str, SortKey); 5] = [
     ("Name", SortKey::Name),
 ];
 const ALL_CATEGORIES: &str = "All categories";
+const ALL_HEROES: &str = "All heroes";
 /// Decoded thumbnails kept in memory (about 190 at 240x135 RGBA).
 const THUMB_BUDGET: usize = 24 * 1024 * 1024;
 const THUMB_WORKERS: usize = 4;
@@ -337,6 +338,27 @@ pub(crate) fn game_error_text(e: &GameError) -> String {
 }
 
 /// Distinct categories, most common first (ties alphabetical).
+/// Distinct heroes in the catalog, A to Z.
+fn heroes(mods: &[ModDto]) -> Vec<String> {
+    let mut list: Vec<String> = mods
+        .iter()
+        .filter_map(|m| m.hero.as_deref().map(str::trim).filter(|h| !h.is_empty()))
+        .map(str::to_owned)
+        .collect();
+    list.sort_by_key(|h| h.to_lowercase());
+    list.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+    list
+}
+
+/// Text of the hero filter button.
+fn heroes_label(selected: &[String]) -> String {
+    match selected {
+        [] => ALL_HEROES.to_owned(),
+        [one] => one.clone(),
+        many => format!("{} heroes", many.len()),
+    }
+}
+
 fn categories(mods: &[ModDto]) -> Vec<String> {
     let mut counts: HashMap<&str, usize> = HashMap::new();
     for m in mods {
@@ -865,6 +887,9 @@ pub struct Browse {
     /// Ids the loaded catalog marks NSFW; `None` until it has loaded.
     nsfw_ids: RefCell<Option<HashSet<String>>>,
     categories: RefCell<Vec<String>>,
+    /// Heroes in the catalog, in the order of `hero_model`.
+    heroes: RefCell<Vec<String>>,
+    hero_model: Rc<VecModel<HeroOption>>,
     query: RefCell<ModQuery>,
     load_generation: Cell<u64>,
     installed_generation: Cell<u64>,
@@ -938,6 +963,8 @@ pub fn attach(app: &App, api_url: &str) -> Arc<thumbs::Cache> {
         nsfw_ids: RefCell::new(None),
         catalog: RefCell::new(Rc::new(Vec::new())),
         categories: RefCell::new(Vec::new()),
+        heroes: RefCell::new(Vec::new()),
+        hero_model: Rc::new(VecModel::default()),
         query: RefCell::new(ModQuery {
             page_size: usize::MAX,
             ..ModQuery::default()
@@ -972,12 +999,15 @@ pub fn attach(app: &App, api_url: &str) -> Arc<thumbs::Cache> {
         ALL_CATEGORIES,
     )])));
     state.set_mods(ModelRc::from(list.clone()));
+    state.set_heroes(ModelRc::from(browse.hero_model.clone()));
     state.set_detail_row(ModelRc::new(DetailRow(list)));
 
     let handle = |f: fn(&Rc<Browse>)| move || with_browse(f);
     state.on_search_edited(|text| with_browse(|b| b.search_edited(text.as_str())));
     state.on_sort_selected(|i| with_browse(|b| b.sort_selected(i)));
     state.on_category_selected(|i| with_browse(|b| b.category_selected(i)));
+    state.on_hero_toggled(|i| with_browse(|b| b.hero_toggled(i)));
+    state.on_heroes_cleared(|| with_browse(|b| b.heroes_cleared()));
     state.on_retry(handle(|b| b.load()));
     state.on_install(|id| with_browse(|b| b.install(id.as_str())));
     state.on_cancel(|id| with_browse(|b| b.cancel(id.as_str())));
@@ -1134,6 +1164,13 @@ impl Browse {
         let mut labels: Vec<SharedString> = vec![ALL_CATEGORIES.into()];
         labels.extend(cats.iter().map(|c| SharedString::from(c.as_str())));
         *self.categories.borrow_mut() = cats;
+        let hero_list = heroes(&mods);
+        self.query
+            .borrow_mut()
+            .heroes
+            .retain(|s| hero_list.iter().any(|h| h.eq_ignore_ascii_case(s)));
+        *self.heroes.borrow_mut() = hero_list;
+        self.sync_heroes();
         *self.nsfw_ids.borrow_mut() = Some(
             mods.iter()
                 .filter(|m| m.is_nsfw)
@@ -1196,6 +1233,50 @@ impl Browse {
             .and_then(|i| SORTS.get(i))
             .map_or(SortKey::default(), |(_, k)| *k);
         self.query.borrow_mut().sort = sort;
+        self.refresh();
+    }
+
+    /// Push the hero list and the selection to the UI.
+    fn sync_heroes(&self) {
+        let list = self.heroes.borrow();
+        let query = self.query.borrow();
+        let rows: Vec<HeroOption> = list
+            .iter()
+            .map(|h| HeroOption {
+                name: h.as_str().into(),
+                selected: query.heroes.iter().any(|s| s.eq_ignore_ascii_case(h)),
+            })
+            .collect();
+        self.hero_model.set_vec(rows);
+        let label = heroes_label(&query.heroes);
+        drop(query);
+        drop(list);
+        self.with_state(|s| s.set_heroes_label(label.as_str().into()));
+    }
+
+    fn hero_toggled(&self, index: i32) {
+        let Some(hero) = usize::try_from(index)
+            .ok()
+            .and_then(|i| self.heroes.borrow().get(i).cloned())
+        else {
+            return;
+        };
+        {
+            let mut q = self.query.borrow_mut();
+            match q.heroes.iter().position(|s| s.eq_ignore_ascii_case(&hero)) {
+                Some(p) => {
+                    q.heroes.remove(p);
+                }
+                None => q.heroes.push(hero),
+            }
+        }
+        self.sync_heroes();
+        self.refresh();
+    }
+
+    fn heroes_cleared(&self) {
+        self.query.borrow_mut().heroes.clear();
+        self.sync_heroes();
         self.refresh();
     }
 
@@ -2066,6 +2147,25 @@ mod tests {
         assert_eq!(d.description.as_str(), "Hi there");
         // Only https links are offered.
         assert!(!d.has_link);
+    }
+
+    #[test]
+    fn heroes_are_distinct_and_sorted_and_labelled() {
+        let m = |h: Option<&str>| ModDto {
+            hero: h.map(str::to_owned),
+            ..ModDto::default()
+        };
+        let mods = [
+            m(Some("Viscous")),
+            m(Some("haze")),
+            m(Some("Haze")),
+            m(None),
+            m(Some(" ")),
+        ];
+        assert_eq!(heroes(&mods), ["haze", "Viscous"]);
+        assert_eq!(heroes_label(&[]), "All heroes");
+        assert_eq!(heroes_label(&["Haze".into()]), "Haze");
+        assert_eq!(heroes_label(&["Haze".into(), "Seven".into()]), "2 heroes");
     }
 
     #[test]

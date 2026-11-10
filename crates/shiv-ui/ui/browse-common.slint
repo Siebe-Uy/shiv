@@ -62,6 +62,11 @@ export struct GalleryThumb {
     has-image: bool,
 }
 
+export struct HeroOption {
+    name: string,
+    selected: bool,
+}
+
 // Everything the Rust side reads or drives.
 export global BrowseState {
     in property <[ModRow]> mods;
@@ -71,6 +76,9 @@ export global BrowseState {
     in property <string> summary;
     in property <[string]> sorts: ["Newest"];
     in property <[string]> categories: ["All categories"];
+    // Heroes in the catalog, for the multi-select filter, and its button text.
+    in property <[HeroOption]> heroes;
+    in property <string> heroes-label: "All heroes";
     in-out property <int> sort-index: 0;
     in-out property <int> category-index: 0;
     // The list's scroll offset, kept while the detail page is open.
@@ -99,6 +107,8 @@ export global BrowseState {
     callback search-edited(string);
     callback sort-selected(int);
     callback category-selected(int);
+    callback hero-toggled(int);
+    callback heroes-cleared();
     callback retry();
     callback install(string);
     callback cancel(string);

@@ -1785,6 +1785,15 @@ mod tests {
         assert_eq!(first(&app).as_deref(), Some("Filler 01"));
         assert_eq!(state.get_summary().as_str(), "32 mods");
 
+        // Hero filter: pick Haze, then clear.
+        assert_eq!(state.get_heroes().row_count(), 1);
+        state.invoke_hero_toggled(0);
+        assert_eq!(state.get_heroes_label().as_str(), "Haze");
+        assert_eq!(state.get_summary().as_str(), "1 of 32 mods");
+        state.invoke_heroes_cleared();
+        assert_eq!(state.get_heroes_label().as_str(), "All heroes");
+        assert_eq!(state.get_summary().as_str(), "32 mods");
+
         // Opened from another screen, Back returns there.
         assert!(!browse::show_detail_from("missing", 2));
         assert!(browse::show_detail_from("f4", 2));

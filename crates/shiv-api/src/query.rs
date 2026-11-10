@@ -22,6 +22,9 @@ pub struct ModQuery {
     pub sort: SortKey,
     /// Case-insensitive exact category match.
     pub category: Option<String>,
+    /// Case-insensitive exact hero match; a mod passes when its hero is any
+    /// of these. Empty means no hero filter.
+    pub heroes: Vec<String>,
     /// Zero-based page index.
     pub page: usize,
     /// Items per page; 0 is treated as 1.
@@ -34,6 +37,7 @@ impl Default for ModQuery {
             search: None,
             sort: SortKey::default(),
             category: None,
+            heroes: Vec::new(),
             page: 0,
             page_size: 50,
         }
@@ -65,6 +69,7 @@ pub fn apply_query(mods: &[ModDto], q: &ModQuery) -> ModPage {
         .filter(|s| !s.is_empty())
         .map(str::to_lowercase);
     let category = q.category.as_deref().map(str::to_lowercase);
+    let heroes: Vec<String> = q.heroes.iter().map(|h| h.to_lowercase()).collect();
 
     let mut hits: Vec<&ModDto> = mods
         .iter()
@@ -75,6 +80,12 @@ pub fn apply_query(mods: &[ModDto], q: &ModQuery) -> ModPage {
                     .as_deref()
                     .is_some_and(|mc| mc.to_lowercase() == c)
             })
+        })
+        .filter(|m| {
+            heroes.is_empty()
+                || m.hero
+                    .as_deref()
+                    .is_some_and(|h| heroes.contains(&h.to_lowercase()))
         })
         .collect();
 
@@ -108,6 +119,37 @@ pub fn apply_query(mods: &[ModDto], q: &ModQuery) -> ModPage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hero_filter_matches_any_selected_hero_case_insensitively() {
+        let hero = |name: &str, h: Option<&str>| ModDto {
+            name: name.into(),
+            hero: h.map(str::to_owned),
+            ..ModDto::default()
+        };
+        let mods = [
+            hero("a", Some("Haze")),
+            hero("b", Some("Viscous")),
+            hero("c", None),
+            hero("d", Some("Seven")),
+        ];
+        let names = |heroes: &[&str]| -> Vec<String> {
+            let q = ModQuery {
+                heroes: heroes.iter().map(|h| (*h).to_owned()).collect(),
+                sort: SortKey::Name,
+                ..ModQuery::default()
+            };
+            apply_query(&mods, &q)
+                .items
+                .into_iter()
+                .map(|m| m.name)
+                .collect()
+        };
+        assert_eq!(names(&[]), ["a", "b", "c", "d"]);
+        assert_eq!(names(&["haze"]), ["a"]);
+        assert_eq!(names(&["HAZE", "seven"]), ["a", "d"]);
+        assert!(names(&["Nobody"]).is_empty());
+    }
 
     fn m(name: &str, author: &str, cat: &str, dl: u64, likes: u64, added: &str) -> ModDto {
         ModDto {

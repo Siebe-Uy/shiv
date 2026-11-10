@@ -284,7 +284,9 @@ pub(crate) fn attach_with(app: &App, cache: Arc<thumbs::Cache>, deps: Deps) {
         with_installed(|i| {
             if !crate::browse::show_detail_from(id.as_str(), 1) {
                 i.with_state(|s| {
-                    s.set_banner_text("This mod is not in the catalog, so it has no detail page.".into());
+                    s.set_banner_text(
+                        "This mod is not in the catalog, so it has no detail page.".into(),
+                    );
                 });
             }
         });

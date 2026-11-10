@@ -3,10 +3,10 @@
 import { ListView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Button, TextButton, SearchField, Dropdown, Switch } from "widgets.slint";
-import { BrowseState, LoadState, InstallState, ModRow, DownloadRow, ModDetail, GalleryThumb, ImageState, InstallControls, NsfwTag } from "browse-common.slint";
+import { BrowseState, LoadState, InstallState, ModRow, DownloadRow, ModDetail, GalleryThumb, HeroOption, ImageState, InstallControls, NsfwTag } from "browse-common.slint";
 import { ModDetailPage } from "mod-detail.slint";
 
-export { BrowseState, LoadState, InstallState, ModRow, DownloadRow, ModDetail, GalleryThumb, ImageState }
+export { BrowseState, LoadState, InstallState, ModRow, DownloadRow, ModDetail, GalleryThumb, HeroOption, ImageState }
 
 component ModRowView inherits Rectangle {
     in property <ModRow> item;
@@ -123,6 +123,120 @@ export component CenteredMessage inherits VerticalLayout {
     }
 }
 
+// Multi-select hero filter: a button that opens a checklist.
+component HeroFilter inherits Rectangle {
+    accessible-role: combobox;
+    accessible-label: "Heroes";
+    accessible-value: BrowseState.heroes-label;
+
+    height: Theme.control-h;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: BrowseState.heroes-label != "All heroes" ? Theme.accent : Theme.border;
+    background: ta.has-hover ? Theme.hover : Theme.raised;
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { popup.show(); }
+    }
+
+    Text {
+        x: Theme.s2;
+        width: parent.width - 2 * Theme.s2 - Theme.s2;
+        height: parent.height;
+        text: BrowseState.heroes-label;
+        color: Theme.text;
+        font-size: Theme.text-md;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    Path {
+        x: parent.width - Theme.s2 - 8px;
+        y: (parent.height - 4px) / 2;
+        width: 8px;
+        height: 4px;
+        viewbox-width: 8;
+        viewbox-height: 4;
+        commands: "M 0 0 L 4 4 L 8 0";
+        stroke: Theme.text-muted;
+        stroke-width: 1.5px;
+    }
+
+    popup := PopupWindow {
+        x: 0px;
+        y: root.height + Theme.s1;
+        width: root.width;
+        height: min((BrowseState.heroes.length + 1) * Theme.control-h + Theme.s2, 360px);
+        close-policy: close-on-click-outside;
+
+        Rectangle {
+            background: Theme.raised;
+            border-radius: Theme.radius;
+            border-width: 1px;
+            border-color: Theme.border;
+
+            Rectangle {
+                x: 1px;
+                y: Theme.s1;
+                width: parent.width - 2px;
+                height: Theme.control-h;
+                background: cta.has-hover ? Theme.hover : transparent;
+                Text {
+                    x: Theme.s2;
+                    width: parent.width - 2 * Theme.s2;
+                    height: parent.height;
+                    text: "All heroes";
+                    color: BrowseState.heroes-label == "All heroes" ? Theme.accent : Theme.text;
+                    font-size: Theme.text-md;
+                    vertical-alignment: center;
+                }
+                cta := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { BrowseState.heroes-cleared(); }
+                }
+            }
+
+            ListView {
+                x: 1px;
+                y: Theme.s1 + Theme.control-h;
+                width: parent.width - 2px;
+                height: parent.height - Theme.s2 - Theme.control-h;
+
+                for hero[i] in BrowseState.heroes: Rectangle {
+                    height: Theme.control-h;
+                    background: hta.has-hover ? Theme.hover : transparent;
+                    // Check box.
+                    Rectangle {
+                        x: Theme.s2;
+                        y: (parent.height - self.height) / 2;
+                        width: 14px;
+                        height: 14px;
+                        border-radius: 3px;
+                        border-width: 1px;
+                        border-color: hero.selected ? Theme.accent : Theme.text-muted;
+                        background: hero.selected ? Theme.accent : transparent;
+                    }
+                    Text {
+                        x: Theme.s2 + 14px + Theme.s1;
+                        width: parent.width - 2 * Theme.s2 - 14px - Theme.s1;
+                        height: parent.height;
+                        text: hero.name;
+                        color: hero.selected ? Theme.accent : Theme.text;
+                        font-size: Theme.text-md;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    hta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { BrowseState.hero-toggled(i); }
+                    }
+                }
+            }
+        }
+    }
+}
+
 export component BrowsePage inherits Rectangle {
     background: Theme.bg;
 
@@ -183,6 +297,9 @@ export component BrowsePage inherits Rectangle {
                     options: BrowseState.sorts;
                     current-index <=> BrowseState.sort-index;
                     selected(i) => { BrowseState.sort-selected(i); }
+                }
+                HeroFilter {
+                    width: 176px;
                 }
                 Dropdown {
                     width: 208px;
