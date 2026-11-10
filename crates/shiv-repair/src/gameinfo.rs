@@ -111,17 +111,17 @@ pub fn with_overlay(text: &str) -> Result<Option<String>, RepairError> {
 
 /// `text` without the repair package's `Game citadel/shiv_repair` mount, or
 /// `None` when it has none. The reverse of [`with_overlay`]: a line holding
-/// only the mount is removed with its line ending; a mount sharing its line
-/// with other tokens loses just its key, value and the space after them.
-/// Everything else (comments, other entries, line endings, a BOM) stays as it
-/// is. Conditional entries (`[$...]`) are left alone: Shiv never writes them.
+/// only the mount (and its own `[$...]` condition, if any) is removed with its
+/// line ending; a mount sharing its line with other tokens loses just its key,
+/// value and the space after them. Everything else (comments, other entries,
+/// line endings, a BOM) stays as it is. Mounts are found exactly as
+/// [`mounts_overlay`] finds them, and the result is checked with it: when a
+/// mount cannot be cut out safely (a condition on a line shared with other
+/// tokens) this fails instead of leaving the package mounted.
 pub fn without_overlay(text: &str) -> Result<Option<String>, RepairError> {
     let doc = parse(text)?;
     let mut cuts: Vec<std::ops::Range<usize>> = Vec::new();
     for site in &doc.sites {
-        if !site.is_unconditional() {
-            continue;
-        }
         let Some(path) = active_game_path(site)? else {
             continue;
         };
@@ -134,9 +134,17 @@ pub fn without_overlay(text: &str) -> Result<Option<String>, RepairError> {
         let start = line_start(text, site.key_start);
         let end = line_end(text, value_range.end);
         let before = &text[start..site.key_start];
-        let after = &text[value_range.end..end];
-        if before.chars().all(char::is_whitespace) && after.trim().is_empty() {
+        let after = text[value_range.end..end].trim();
+        let own_condition = after.starts_with('[')
+            && after.ends_with(']')
+            && after.matches('[').count() == 1
+            && after.matches(']').count() == 1;
+        if before.chars().all(char::is_whitespace) && (after.is_empty() || own_condition) {
             cuts.push(start..end);
+        } else if text[value_range.end..].trim_start().starts_with('[') {
+            return Err(RepairError::Gameinfo(format!(
+                "gameinfo.gi mounts `{OVERLAY_SEARCH_PATH}` with a condition on a shared line; remove that entry by hand"
+            )));
         } else {
             let rest = &text[value_range.end..];
             let spaces = rest.len() - rest.trim_start_matches([' ', '\t']).len();
@@ -157,6 +165,11 @@ pub fn without_overlay(text: &str) -> Result<Option<String>, RepairError> {
         at = cut.end;
     }
     out.push_str(&text[at..]);
+    if mounts_overlay(&out)? {
+        return Err(RepairError::Gameinfo(format!(
+            "gameinfo.gi still mounts `{OVERLAY_SEARCH_PATH}` after removing its entries; remove it by hand"
+        )));
+    }
     Ok(Some(out))
 }
 
@@ -215,9 +228,25 @@ mod tests {
         let text = "\"GameInfo\"\n{\n\t// mine\n\tFileSystem\n\t{\n\t\tSearchPaths\n\t\t{\n\t\t\tGame citadel/shiv_repair\n\t\t\tGame citadel/addons // keep\n\t\t\tGame core\n\t\t}\n\t}\n\tConVars { fps_max 240 }\n}\n";
         let expected = text.replace("\t\t\tGame citadel/shiv_repair\n", "");
         assert_eq!(without_overlay(text).unwrap(), Some(expected));
-        // A conditional entry was not written by Shiv and stays.
-        let conditional = "GameInfo { FileSystem { SearchPaths { Game citadel/shiv_repair [$LINUX] Game core } } }";
-        assert_eq!(without_overlay(conditional).unwrap(), None);
+        // A conditional entry the game applies (WIN32: Proton) goes too, with
+        // its condition, exactly as `mounts_overlay` sees it.
+        let conditional = "GameInfo\n{\n\tFileSystem\n\t{\n\t\tSearchPaths\n\t\t{\n\t\t\tGame citadel/shiv_repair [$WIN32]\n\t\t\tGame citadel/addons\n\t\t}\n\t}\n}\n";
+        assert!(mounts_overlay(conditional).unwrap());
+        let removed = without_overlay(conditional).unwrap().unwrap();
+        assert_eq!(
+            removed,
+            conditional.replace("\t\t\tGame citadel/shiv_repair [$WIN32]\n", "")
+        );
+        // One the game does not apply is not a mount and stays.
+        let inactive = "GameInfo { FileSystem { SearchPaths { Game citadel/shiv_repair [$LINUX] Game core } } }";
+        assert_eq!(without_overlay(inactive).unwrap(), None);
+        // On a shared line it can't be cut out safely: refuse, never leave it.
+        let shared = "GameInfo { FileSystem { SearchPaths { Game citadel/shiv_repair [$WIN32] Game core } } }";
+        assert!(mounts_overlay(shared).unwrap());
+        assert!(matches!(
+            without_overlay(shared),
+            Err(RepairError::Gameinfo(_))
+        ));
     }
 
     #[test]

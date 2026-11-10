@@ -187,10 +187,25 @@ pub fn restore_backup_set(backup: &Path) -> Result<RestoreOutcome, Error> {
     restore_backup_set_except(backup, &[])
 }
 
+/// Whether `folder/name` and `path` name the same file, comparing the folders
+/// after resolving links and `..` where they exist.
+fn same_file_path(folder: &Path, name: &str, path: &Path) -> bool {
+    if path.file_name().and_then(|n| n.to_str()) != Some(name) {
+        return false;
+    }
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    match (fs::canonicalize(folder), fs::canonicalize(parent)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => folder == parent,
+    }
+}
+
 /// A file as a [`create_backup_set`] backup recorded it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SavedFile {
-    /// Where the file belongs.
+    /// Where the file belongs, as the backup recorded it.
     pub path: PathBuf,
     /// Its bytes when the backup was taken; `None` when it did not exist.
     pub bytes: Option<Vec<u8>>,
@@ -203,7 +218,7 @@ pub fn saved_file(backup: &Path, path: &Path) -> Result<Option<SavedFile>, Error
     let index = read_index(backup)?;
     for entry in &index.entries {
         let name = bare_file_name(&entry.name)?;
-        if entry.target.join(name) != path {
+        if !same_file_path(&entry.target, name, path) {
             continue;
         }
         let bytes = if entry.existed {
@@ -212,7 +227,7 @@ pub fn saved_file(backup: &Path, path: &Path) -> Result<Option<SavedFile>, Error
             None
         };
         return Ok(Some(SavedFile {
-            path: path.to_path_buf(),
+            path: entry.target.join(name),
             bytes,
             modified: entry.modified,
         }));
