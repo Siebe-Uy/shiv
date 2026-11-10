@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::Duration;
 
-use shiv_api::{ApiError, Client, ModDto, ModQuery, SortKey, apply_query};
+use shiv_api::{ApiError, Client, DownloadFile, ModDto, ModQuery, SortKey, apply_query};
 use shiv_core::game::{self, GameError};
 use shiv_core::install::{self, InstallError, ModMeta};
 use shiv_core::sidecar;
@@ -21,7 +21,7 @@ use slint::{
 };
 
 use crate::thumbs;
-use crate::{App, BrowseState, InstallState, LoadState, ModRow};
+use crate::{App, BrowseState, DownloadRow, InstallState, LoadState, ModRow};
 
 const SORTS: [(&str, SortKey); 5] = [
     ("Newest", SortKey::Newest),
@@ -73,6 +73,33 @@ fn fmt_count(n: u64) -> String {
 
 fn fmt_mb(bytes: u64) -> String {
     format!("{:.1} MB", bytes as f64 / 1_000_000.0)
+}
+
+/// A download's size for the file picker; the API reports 0 when unknown.
+fn fmt_size(bytes: Option<u64>) -> String {
+    match bytes {
+        None | Some(0) => "Size unknown".into(),
+        Some(b) if b < 1_000_000 => format!("{} KB", b.div_ceil(1000)),
+        Some(b) => fmt_mb(b),
+    }
+}
+
+/// Rows for the download picker; a file without a name shows its URL's last segment.
+fn download_rows(files: &[DownloadFile]) -> Vec<DownloadRow> {
+    files
+        .iter()
+        .map(|f| {
+            let name = if f.name.trim().is_empty() {
+                f.url.rsplit('/').next().unwrap_or(&f.url)
+            } else {
+                f.name.as_str()
+            };
+            DownloadRow {
+                name: name.into(),
+                size: fmt_size(f.size).into(),
+            }
+        })
+        .collect()
 }
 
 /// The `YYYY-MM-DD` part of an ISO-8601 timestamp (the UTC date, as the API
@@ -300,6 +327,9 @@ enum Phase {
 
 struct Job {
     generation: u64,
+    /// The file being downloaded (read by the UI test).
+    #[cfg(test)]
+    url: String,
     cancel: Arc<AtomicBool>,
     phase: Phase,
 }
@@ -307,6 +337,9 @@ struct Job {
 struct ModList {
     entries: RefCell<Vec<Entry>>,
     jobs: RefCell<HashMap<String, Job>>,
+    /// Mod id -> generation of the download-list request running for it.
+    /// Cancel removes the entry, so its late answer is ignored.
+    resolving: RefCell<HashMap<String, u64>>,
     /// Mod id -> generation of the worker still running for it. Survives
     /// Cancel and is cleared only by that worker's `Done`, so Install is
     /// refused until the previous worker has really stopped.
@@ -427,6 +460,12 @@ impl Model for ModList {
                 None => {}
             }
         }
+        if self.resolving.borrow().contains_key(&e.id) {
+            out.state = InstallState::Downloading;
+            out.progress = -1.0;
+            out.progress_text = "Checking files".into();
+            return Some(out);
+        }
         out.state = match self.jobs.borrow().get(&e.id) {
             Some(job) => match &job.phase {
                 Phase::Downloading { progress, text } => {
@@ -454,7 +493,7 @@ impl Model for ModList {
 
 struct InstallTask {
     mod_id: String,
-    remote_id: String,
+    file: DownloadFile,
     name: String,
     version: Option<String>,
     thumbnail_url: Option<String>,
@@ -483,13 +522,7 @@ fn run_install(
     if game::is_running() {
         return Err(msg(install_error_text(&InstallError::GameRunning)));
     }
-    let files = client
-        .downloads(&task.remote_id)
-        .map_err(|e| msg(format!("Could not get the download list: {e}")))?;
-    let file = files
-        .into_iter()
-        .next()
-        .ok_or_else(|| msg("This mod has no downloadable files.".into()))?;
+    let file = task.file;
     let dir = tempfile::Builder::new()
         .prefix("shiv-download-")
         .tempdir()
@@ -569,6 +602,8 @@ pub struct Browse {
     load_generation: Cell<u64>,
     installed_generation: Cell<u64>,
     next_job: Cell<u64>,
+    /// The open download picker: the mod and its files.
+    picker: RefCell<Option<(String, Vec<DownloadFile>)>>,
     search_timer: Timer,
     this: RefCell<RcWeak<Browse>>,
 }
@@ -580,6 +615,7 @@ pub fn attach(app: &App, api_url: &str) -> Arc<thumbs::Cache> {
     let list = Rc::new(ModList {
         entries: RefCell::new(Vec::new()),
         jobs: RefCell::new(HashMap::new()),
+        resolving: RefCell::new(HashMap::new()),
         in_flight: RefCell::new(HashMap::new()),
         installed: RefCell::new(HashSet::new()),
         installed_since: RefCell::new(HashSet::new()),
@@ -602,6 +638,7 @@ pub fn attach(app: &App, api_url: &str) -> Arc<thumbs::Cache> {
         load_generation: Cell::new(0),
         installed_generation: Cell::new(0),
         next_job: Cell::new(0),
+        picker: RefCell::new(None),
         search_timer: Timer::default(),
         this: RefCell::new(RcWeak::new()),
     });
@@ -623,6 +660,10 @@ pub fn attach(app: &App, api_url: &str) -> Arc<thumbs::Cache> {
     state.on_retry(handle(|b| b.load()));
     state.on_install(|id| with_browse(|b| b.install(id.as_str())));
     state.on_cancel(|id| with_browse(|b| b.cancel(id.as_str())));
+    state.on_pick_download(|i| with_browse(|b| b.pick_download(i)));
+    state.on_cancel_pick(handle(|b| {
+        b.close_picker();
+    }));
     state.on_dismiss_banner(handle(|b| b.set_banner("")));
     state.on_shown(refresh_installed);
     state.on_toggle_nsfw(|| {
@@ -816,9 +857,116 @@ impl Browse {
         self.refresh();
     }
 
+    fn busy(&self, id: &str) -> bool {
+        self.list.jobs.borrow().contains_key(id)
+            || self.list.in_flight.borrow().contains_key(id)
+            || self.list.resolving.borrow().contains_key(id)
+    }
+
+    /// Install: fetch the mod's download list first. One file installs at
+    /// once; several open the picker. Nothing is marked in flight until a
+    /// file is chosen.
     fn install(&self, id: &str) {
-        if self.list.jobs.borrow().contains_key(id) || self.list.in_flight.borrow().contains_key(id)
+        if self.busy(id) || self.picker.borrow().is_some() {
+            return;
+        }
+        let Some((_, entry)) = self.list.find(id) else {
+            return;
+        };
+        let generation = self.next_job.get() + 1;
+        self.next_job.set(generation);
+        self.list
+            .resolving
+            .borrow_mut()
+            .insert(id.to_owned(), generation);
+        self.list.changed(id);
+        let client = self.client.clone();
+        let weak = self.weak.clone();
+        let mod_id = id.to_owned();
+        let remote_id = entry.remote_id;
+        let started = crate::spawn_worker(
+            "shiv-downloads",
+            move || {
+                client
+                    .downloads(&remote_id)
+                    .map_err(|e| format!("Could not get the download list: {e}"))
+            },
+            move |result| {
+                let result = result.and_then(|r| r);
+                let _ = weak.upgrade_in_event_loop(move |_| {
+                    with_browse(|b| b.resolved(&mod_id, generation, result));
+                });
+            },
+        );
+        if !started {
+            self.resolved(
+                id,
+                generation,
+                Err("Could not start a background thread.".into()),
+            );
+        }
+    }
+
+    fn resolved(&self, id: &str, generation: u64, result: Result<Vec<DownloadFile>, String>) {
         {
+            let mut resolving = self.list.resolving.borrow_mut();
+            if resolving.get(id) != Some(&generation) {
+                return; // cancelled, or superseded
+            }
+            resolving.remove(id);
+        }
+        self.list.changed(id);
+        let name = self
+            .list
+            .find(id)
+            .map_or_else(|| id.to_owned(), |(_, e)| e.name);
+        let mut files = match result {
+            Ok(files) => files,
+            Err(text) => return self.set_banner(&format!("Could not install {name}. {text}")),
+        };
+        match files.len() {
+            0 => self.set_banner(&format!(
+                "Could not install {name}. This mod has no downloadable files."
+            )),
+            1 => {
+                let file = files.remove(0);
+                self.start_job(id, file);
+            }
+            _ => {
+                let rows = download_rows(&files);
+                *self.picker.borrow_mut() = Some((id.to_owned(), files));
+                self.with_state(|s| {
+                    s.set_picker_title(format!("Install {name}").into());
+                    s.set_picker_files(ModelRc::new(VecModel::from(rows)));
+                    s.set_picker_open(true);
+                });
+            }
+        }
+    }
+
+    fn close_picker(&self) -> Option<(String, Vec<DownloadFile>)> {
+        let open = self.picker.borrow_mut().take();
+        self.with_state(|s| {
+            s.set_picker_open(false);
+            s.set_picker_files(ModelRc::default());
+        });
+        open
+    }
+
+    fn pick_download(&self, index: i32) {
+        let Some((id, mut files)) = self.close_picker() else {
+            return;
+        };
+        let Some(i) = usize::try_from(index).ok().filter(|i| *i < files.len()) else {
+            return;
+        };
+        let file = files.swap_remove(i);
+        self.start_job(&id, file);
+    }
+
+    /// Download and install `file`: the in-flight marker is set here.
+    fn start_job(&self, id: &str, file: DownloadFile) {
+        if self.busy(id) {
             return;
         }
         let Some((_, entry)) = self.list.find(id) else {
@@ -831,6 +979,8 @@ impl Browse {
             id.to_owned(),
             Job {
                 generation,
+                #[cfg(test)]
+                url: file.url.clone(),
                 cancel: cancel.clone(),
                 phase: Phase::Downloading {
                     progress: -1.0,
@@ -846,7 +996,7 @@ impl Browse {
 
         let task = InstallTask {
             mod_id: entry.id.clone(),
-            remote_id: entry.remote_id,
+            file,
             name: entry.name,
             version: entry.version,
             thumbnail_url: entry.thumb_url,
@@ -883,6 +1033,11 @@ impl Browse {
     }
 
     fn cancel(&self, id: &str) {
+        // Still fetching the download list: forget it; its answer is ignored.
+        if self.list.resolving.borrow_mut().remove(id).is_some() {
+            self.list.changed(id);
+            return;
+        }
         let removed = self.list.jobs.borrow_mut().remove(id);
         if let Some(job) = removed {
             // The worker notices at its next chunk (or right after taking the
@@ -958,6 +1113,38 @@ pub(crate) mod test_hooks {
     pub fn in_flight(id: &str) -> Option<u64> {
         let mut out = None;
         with_browse(|b| out = b.list.in_flight.borrow().get(id).copied());
+        out
+    }
+
+    pub fn resolving(id: &str) -> bool {
+        let mut out = false;
+        with_browse(|b| out = b.list.resolving.borrow().contains_key(id));
+        out
+    }
+
+    /// What the download-list request delivers for the current request of `id`.
+    pub fn resolve(id: &str, urls: &[&str]) {
+        with_browse(|b| {
+            let Some(generation) = b.list.resolving.borrow().get(id).copied() else {
+                return;
+            };
+            let files = urls
+                .iter()
+                .map(|u| DownloadFile {
+                    url: (*u).to_owned(),
+                    name: "f.zip".into(),
+                    size: None,
+                    md5_checksum: None,
+                })
+                .collect();
+            b.resolved(id, generation, Ok(files));
+        });
+    }
+
+    /// The file URL the running job for `id` downloads.
+    pub fn job_url(id: &str) -> Option<String> {
+        let mut out = None;
+        with_browse(|b| out = b.list.jobs.borrow().get(id).map(|j| j.url.clone()));
         out
     }
 
@@ -1069,6 +1256,35 @@ mod tests {
         };
         let mods = [m("HUD"), m("Skins"), m("Skins"), m("Audio"), m("")];
         assert_eq!(categories(&mods), ["Skins", "Audio", "HUD"]);
+    }
+
+    #[test]
+    fn download_picker_rows() {
+        let f = |url: &str, name: &str, size: Option<u64>| DownloadFile {
+            url: url.into(),
+            name: name.into(),
+            size,
+            md5_checksum: None,
+        };
+        let rows = download_rows(&[
+            f("https://x.test/a.zip", "Main.zip", Some(2_500_000)),
+            f("https://x.test/files/alt.7z", " ", Some(0)),
+            f("https://x.test/c.rar", "Tiny.rar", Some(1_500)),
+            f("https://x.test/d.zip", "d.zip", None),
+        ]);
+        let got: Vec<(String, String)> = rows
+            .iter()
+            .map(|r| (r.name.to_string(), r.size.to_string()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("Main.zip".into(), "2.5 MB".into()),
+                ("alt.7z".into(), "Size unknown".into()),
+                ("Tiny.rar".into(), "2 KB".into()),
+                ("d.zip".into(), "Size unknown".into()),
+            ]
+        );
     }
 
     #[test]

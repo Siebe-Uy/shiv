@@ -25,6 +25,13 @@ export struct ModRow {
     progress-text: string,
 }
 
+// One file in the download picker.
+export struct DownloadRow {
+    name: string,
+    // "2.5 MB", or "Size unknown".
+    size: string,
+}
+
 // Everything the Rust side reads or drives.
 export global BrowseState {
     in property <[ModRow]> mods;
@@ -38,6 +45,10 @@ export global BrowseState {
     in-out property <int> category-index: 0;
     // NSFW thumbnails shown unblurred; off at every start.
     in property <bool> show-nsfw: false;
+    // Download picker, shown when a mod offers more than one file.
+    in property <bool> picker-open: false;
+    in property <string> picker-title;
+    in property <[DownloadRow]> picker-files;
 
     callback search-edited(string);
     callback sort-selected(int);
@@ -47,6 +58,8 @@ export global BrowseState {
     callback cancel(string);
     callback dismiss-banner();
     callback toggle-nsfw();
+    callback pick-download(int);
+    callback cancel-pick();
     // The screen was shown: re-read which mods are installed.
     callback shown();
 }
@@ -329,6 +342,127 @@ export component BrowsePage inherits Rectangle {
                 visible: BrowseState.load-state == LoadState.ready && BrowseState.mods.length > 0;
                 for row in BrowseState.mods: ModRowView {
                     item: row;
+                }
+            }
+        }
+    }
+}
+
+component DownloadRowView inherits Rectangle {
+    in property <DownloadRow> item;
+    callback picked;
+    height: layout.preferred-height;
+    background: ta.has-hover ? Theme.hover : transparent;
+    border-radius: Theme.radius;
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.picked(); }
+    }
+
+    layout := HorizontalLayout {
+        padding: Theme.s1;
+        padding-left: Theme.s2;
+        spacing: Theme.s2;
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 2px;
+            Text {
+                text: root.item.name;
+                color: Theme.text;
+                font-size: Theme.text-md;
+                font-weight: 600;
+                overflow: elide;
+            }
+            Text {
+                text: root.item.size;
+                color: Theme.text-muted;
+                font-size: Theme.text-sm;
+            }
+        }
+        Button {
+            y: (parent.height - self.height) / 2;
+            text: "Install";
+            clicked => { root.picked(); }
+        }
+    }
+}
+
+// Modal over the whole window: choose which of a mod's files to install.
+export component DownloadPicker inherits Rectangle {
+    background: Theme.bg-sunken.with-alpha(0.75);
+
+    // Swallow clicks on the scrim.
+    TouchArea { }
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                BrowseState.cancel-pick();
+                return accept;
+            }
+            reject
+        }
+    }
+
+    init => { keys.focus(); }
+
+    card := Rectangle {
+        width: min(520px, root.width - 2 * Theme.s4);
+        height: min(body.preferred-height, root.height - 2 * Theme.s4);
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        background: Theme.raised;
+        border-radius: Theme.radius-md;
+        border-width: 1px;
+        border-color: Theme.border;
+
+        // The card itself must not pass clicks to the scrim below.
+        TouchArea { }
+
+        body := VerticalLayout {
+            padding: Theme.s3;
+            spacing: Theme.s2;
+
+            VerticalLayout {
+                spacing: Theme.s1;
+                Text {
+                    text: BrowseState.picker-title;
+                    color: Theme.text;
+                    font-size: Theme.text-xl;
+                    font-weight: 600;
+                    overflow: elide;
+                }
+                Text {
+                    text: "This mod offers more than one file. Choose the one to install.";
+                    color: Theme.text-muted;
+                    font-size: Theme.text-md;
+                    wrap: word-wrap;
+                }
+            }
+
+            Rectangle {
+                height: min(BrowseState.picker-files.length * 56px, 280px);
+                border-width: 1px;
+                border-color: Theme.border;
+                border-radius: Theme.radius;
+                background: Theme.bg;
+                clip: true;
+
+                ListView {
+                    for f[i] in BrowseState.picker-files: DownloadRowView {
+                        item: f;
+                        picked => { BrowseState.pick-download(i); }
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                alignment: end;
+                Button {
+                    text: "Cancel";
+                    clicked => { BrowseState.cancel-pick(); }
                 }
             }
         }

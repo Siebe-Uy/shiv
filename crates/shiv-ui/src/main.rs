@@ -230,6 +230,7 @@ mod tests {
         let api = stub_api();
         install_cancel_and_failure(&api);
         nsfw_flow(&api);
+        download_picker_flow(&api);
         installed_screen();
         launch_flow();
         repair_flow();
@@ -1435,21 +1436,34 @@ mod tests {
         out.into_inner()
     }
 
-    /// Catalog with a mod and an NSFW mod sharing one thumbnail; every other
-    /// path (the downloads list) is 404, so an install can never reach the
+    /// Catalog with a mod and an NSFW mod sharing one thumbnail, a mod with
+    /// two download files and one with a single file. The download lists of
+    /// m1 and m2 and every file URL are 404, so an install can never reach the
     /// real addons folder.
     fn stub_api() -> String {
         let server = tiny_http::Server::http("127.0.0.1:0").expect("stub server");
         let url = format!("http://{}", server.server_addr().to_ip().expect("ip"));
         let catalog = format!(
             r#"[{{"id":"m1","remoteId":"1","name":"Test Mod","downloadable":true,"thumbnailUrl":"{url}/t.png"}},
-               {{"id":"m2","remoteId":"2","name":"Spicy Skin","downloadable":true,"isNSFW":true,"thumbnailUrl":"{url}/t.png"}}]"#
+               {{"id":"m2","remoteId":"2","name":"Spicy Skin","downloadable":true,"isNSFW":true,"thumbnailUrl":"{url}/t.png"}},
+               {{"id":"m3","remoteId":"3","name":"Two Files","downloadable":true}},
+               {{"id":"m4","remoteId":"4","name":"One File","downloadable":true}}]"#
         );
+        let two = format!(
+            r#"{{"downloads":[{{"url":"{url}/f/main.zip","name":"Main.zip","size":2500000,"md5Checksum":"x"}},
+               {{"url":"{url}/f/alt.zip","name":"Alt colours.zip","size":0}}]}}"#
+        );
+        let one =
+            format!(r#"{{"downloads":[{{"url":"{url}/f/one.zip","name":"One.zip","size":10}}]}}"#);
         let png = stub_png();
         std::thread::spawn(move || {
             for req in server.incoming_requests() {
                 let resp = if req.url() == "/v2/mods" {
                     tiny_http::Response::from_string(catalog.clone())
+                } else if req.url() == "/v2/mods/3/downloads" {
+                    tiny_http::Response::from_string(two.clone())
+                } else if req.url() == "/v2/mods/4/downloads" {
+                    tiny_http::Response::from_string(one.clone())
                 } else if req.url() == "/t.png" {
                     tiny_http::Response::from_data(png.clone())
                 } else {
@@ -1472,7 +1486,9 @@ mod tests {
         let state = app.global::<BrowseState>();
         let thumbs_loaded = |a: &App| {
             let mods = a.global::<BrowseState>().get_mods();
-            mods.row_count() == 2 && mods.iter().all(|r| r.has_thumb)
+            mods.row_count() == 4
+                && mods.row_data(0).is_some_and(|r| r.has_thumb)
+                && mods.row_data(1).is_some_and(|r| r.has_thumb)
         };
         assert!(run_until(&app, Duration::from_secs(20), thumbs_loaded));
         assert!(!state.get_show_nsfw());
@@ -1504,7 +1520,7 @@ mod tests {
             a.global::<BrowseState>().get_mods().row_count() == 1
         }));
         assert!(row(0).nsfw);
-        assert_eq!(state.get_summary().as_str(), "1 of 2 mods");
+        assert_eq!(state.get_summary().as_str(), "1 of 4 mods");
 
         // A new session starts with NSFW blurred again.
         switch.invoke_accessible_default_action();
@@ -1554,7 +1570,17 @@ mod tests {
 
         // Deterministic: worker posts are only applied while the event loop
         // runs, so nothing below races with the real worker.
+        // Install first asks for the download list; nothing is in flight yet.
         state.invoke_install("m1".into());
+        assert_eq!(row_state(&app), Some(InstallState::Downloading));
+        assert!(hooks::resolving("m1"));
+        assert_eq!(hooks::in_flight("m1"), None);
+        assert_eq!(hooks::job_generation("m1"), None);
+        // One file: the job starts at once (the real list request's answer,
+        // a 404, is ignored from now on).
+        hooks::resolve("m1", &["http://127.0.0.1:9/never.zip"]);
+        assert!(!hooks::resolving("m1"));
+        assert!(!state.get_picker_open());
         assert_eq!(row_state(&app), Some(InstallState::Downloading));
         let first = hooks::job_generation("m1").expect("job");
         assert_eq!(hooks::in_flight("m1"), Some(first));
@@ -1596,5 +1622,111 @@ mod tests {
         assert_eq!(row_state(&app), Some(InstallState::Idle));
         click(&app, "Dismiss");
         assert_eq!(state.get_banner_text(), "");
+    }
+
+    /// More than one download file opens the picker; nothing is in flight
+    /// until a file is chosen, Cancel leaves no trace, and the chosen file is
+    /// the one installed. One file installs without asking.
+    fn download_picker_flow(api: &str) {
+        use browse::test_hooks as hooks;
+        let app = App::new().expect("app");
+        browse::attach(&app, api);
+        app.show().expect("show");
+        let state = app.global::<BrowseState>();
+        let ready = |a: &App| a.global::<BrowseState>().get_load_state() == LoadState::Ready;
+        assert!(run_until(&app, Duration::from_secs(20), ready));
+        let row_state = |a: &App, i: usize| {
+            a.global::<BrowseState>()
+                .get_mods()
+                .row_data(i)
+                .map(|r| r.state)
+        };
+        let picker = |a: &App| a.global::<BrowseState>().get_picker_open();
+
+        state.invoke_install("m3".into());
+        assert!(run_until(&app, Duration::from_secs(20), picker));
+        assert_eq!(state.get_picker_title().as_str(), "Install Two Files");
+        let files: Vec<(String, String)> = state
+            .get_picker_files()
+            .iter()
+            .map(|r| (r.name.to_string(), r.size.to_string()))
+            .collect();
+        assert_eq!(
+            files,
+            [
+                ("Main.zip".into(), "2.5 MB".into()),
+                ("Alt colours.zip".into(), "Size unknown".into())
+            ]
+        );
+        assert_eq!(hooks::in_flight("m3"), None);
+        assert_eq!(hooks::job_generation("m3"), None);
+        assert!(!hooks::resolving("m3"));
+        assert_eq!(row_state(&app, 2), Some(InstallState::Idle));
+        // Other installs wait while the picker is open.
+        state.invoke_install("m4".into());
+        assert!(!hooks::resolving("m4") && hooks::job_generation("m4").is_none());
+
+        // Cancel: closed, nothing in flight, no banner.
+        state.invoke_cancel_pick();
+        assert!(!state.get_picker_open());
+        assert_eq!(state.get_picker_files().row_count(), 0);
+        assert_eq!(hooks::in_flight("m3"), None);
+        assert_eq!(row_state(&app, 2), Some(InstallState::Idle));
+        run_until(&app, Duration::from_millis(300), |_| false);
+        assert_eq!(state.get_banner_text(), "");
+
+        // Choosing a file starts the job for that file.
+        state.invoke_install("m3".into());
+        assert!(run_until(&app, Duration::from_secs(20), picker));
+        state.invoke_pick_download(1);
+        assert!(!state.get_picker_open());
+        let job = hooks::job_generation("m3").expect("job started");
+        assert_eq!(hooks::in_flight("m3"), Some(job));
+        assert_eq!(
+            hooks::job_url("m3").as_deref(),
+            Some(format!("{api}/f/alt.zip").as_str())
+        );
+        // Its download is a 404 (or the game is not found): a banner, marker cleared.
+        assert!(run_until(&app, Duration::from_secs(20), |a| {
+            a.global::<BrowseState>().get_banner_text() != ""
+        }));
+        assert!(
+            state
+                .get_banner_text()
+                .starts_with("Could not install Two Files."),
+            "{}",
+            state.get_banner_text()
+        );
+        assert_eq!(hooks::in_flight("m3"), None);
+        click(&app, "Dismiss");
+
+        // Cancel while the list is still loading: back to idle, no picker later.
+        state.invoke_install("m3".into());
+        assert!(hooks::resolving("m3"));
+        state.invoke_cancel("m3".into());
+        assert!(!hooks::resolving("m3"));
+        assert_eq!(row_state(&app, 2), Some(InstallState::Idle));
+        run_until(&app, Duration::from_millis(500), |_| false);
+        assert!(!state.get_picker_open());
+        assert_eq!(state.get_banner_text(), "");
+
+        // One file: no picker, the job starts.
+        state.invoke_install("m4".into());
+        assert!(run_until(&app, Duration::from_secs(20), |a| {
+            hooks::job_generation("m4").is_some()
+                || hooks::in_flight("m4").is_some()
+                || a.global::<BrowseState>().get_banner_text() != ""
+        }));
+        assert!(!state.get_picker_open());
+        assert!(run_until(&app, Duration::from_secs(20), |a| {
+            a.global::<BrowseState>().get_banner_text() != "" && hooks::in_flight("m4").is_none()
+        }));
+        assert!(
+            state
+                .get_banner_text()
+                .starts_with("Could not install One File."),
+            "{}",
+            state.get_banner_text()
+        );
     }
 }
