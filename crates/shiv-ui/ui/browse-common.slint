@@ -66,6 +66,18 @@ export struct GalleryThumb {
     has-image: bool,
 }
 
+// Load state of a detail-page tab that fetches from GameBanana.
+export enum TabLoad { idle, loading, ready, failed, hidden }
+
+// One entry of a detail-page list: a file, a changelog entry or a comment.
+export struct TextRow {
+    title: string,
+    // Facts line: size and date, author and date, version.
+    meta: string,
+    // Plain text, "" for none.
+    body: string,
+}
+
 export struct HeroOption {
     name: string,
     selected: bool,
@@ -101,6 +113,17 @@ export global BrowseState {
     // Screen to return to when the detail page was opened from elsewhere, -1 for none.
     in-out property <int> return-screen: -1;
     in property <ModDetail> detail;
+    // Detail tabs: 0 Description, 1 Files, 2 Changelog, 3 Comments. The last
+    // three load from GameBanana when first opened.
+    in-out property <int> detail-tab: 0;
+    in property <[TextRow]> files;
+    in property <TabLoad> files-load: TabLoad.idle;
+    in property <[TextRow]> changes;
+    in property <TabLoad> changes-load: TabLoad.idle;
+    in property <bool> changes-more: false;
+    in property <[TextRow]> comments;
+    in property <TabLoad> comments-load: TabLoad.idle;
+    in property <bool> comments-more: false;
     // The detail mod's install state: one row, from the same source as the list.
     in property <[ModRow]> detail-row;
     // Gallery: the large image (blurred for NSFW unless Show NSFW is on).
@@ -130,6 +153,10 @@ export global BrowseState {
     callback shown();
     callback open-detail(string);
     callback close-detail();
+    callback detail-tab-selected(int);
+    // Load the next page of a tab (2 or 3).
+    callback tab-more(int);
+    callback tab-retry(int);
     // Show gallery image `index`, or step by `delta` (wraps around).
     callback gallery-select(int);
     callback gallery-step(int);

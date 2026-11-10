@@ -4,7 +4,7 @@
 import { ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Button, TextButton, Switch } from "widgets.slint";
-import { BrowseState, ModRow, ImageState, InstallControls, NsfwTag } from "browse-common.slint";
+import { BrowseState, ModRow, ImageState, InstallControls, NsfwTag, TabLoad, TextRow } from "browse-common.slint";
 
 component Fact inherits HorizontalLayout {
     in property <string> label;
@@ -22,6 +22,116 @@ component Fact inherits HorizontalLayout {
         color: Theme.text;
         font-size: Theme.text-md;
         wrap: word-wrap;
+    }
+}
+
+component TabButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    callback picked;
+
+    accessible-role: tab;
+    accessible-label: root.label;
+    accessible-item-selected: root.active;
+    accessible-action-default => { root.picked(); }
+
+    height: Theme.control-h;
+    min-width: text.preferred-width + 2 * Theme.s2;
+
+    text := Text {
+        text: root.label;
+        color: root.active ? Theme.text : (ta.has-hover ? Theme.text : Theme.text-muted);
+        font-size: Theme.text-md;
+        font-weight: root.active ? 600 : 400;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    Rectangle {
+        y: parent.height - 2px;
+        height: 2px;
+        background: root.active ? Theme.accent : transparent;
+    }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.picked(); }
+    }
+}
+
+// A fetched list (files, changelog, comments) with its loading states.
+component RowsTab inherits VerticalLayout {
+    in property <[TextRow]> rows;
+    in property <TabLoad> load;
+    in property <bool> more: false;
+    in property <string> empty-text;
+    in property <string> hidden-text: "";
+    in property <int> tab;
+    spacing: Theme.s2;
+
+    if root.load == TabLoad.loading && root.rows.length == 0: Text {
+        text: "Loading\u{2026}";
+        color: Theme.text-muted;
+        font-size: Theme.text-md;
+    }
+    if root.load == TabLoad.hidden: Text {
+        text: root.hidden-text;
+        color: Theme.text-faint;
+        font-size: Theme.text-md;
+    }
+    if root.load == TabLoad.ready && root.rows.length == 0: Text {
+        text: root.empty-text;
+        color: Theme.text-faint;
+        font-size: Theme.text-md;
+    }
+    if root.load == TabLoad.failed: HorizontalLayout {
+        spacing: Theme.s2;
+        alignment: start;
+        Text {
+            text: "Could not load this from GameBanana.";
+            color: Theme.text-muted;
+            font-size: Theme.text-md;
+            vertical-alignment: center;
+        }
+        Button {
+            text: "Retry";
+            clicked => { BrowseState.tab-retry(root.tab); }
+        }
+    }
+
+    for row in root.rows: VerticalLayout {
+        spacing: 2px;
+        padding-bottom: Theme.s1;
+        Text {
+            text: row.title;
+            color: Theme.text;
+            font-size: Theme.text-md;
+            font-weight: 600;
+            wrap: word-wrap;
+        }
+        if row.meta != "": Text {
+            text: row.meta;
+            color: Theme.text-muted;
+            font-size: Theme.text-sm;
+            wrap: word-wrap;
+        }
+        if row.body != "": Text {
+            text: row.body;
+            color: Theme.text;
+            font-size: Theme.text-md;
+            wrap: word-wrap;
+        }
+        Rectangle {
+            height: 1px;
+            background: Theme.border;
+        }
+    }
+
+    if root.more: HorizontalLayout {
+        alignment: start;
+        Button {
+            text: root.load == TabLoad.loading ? "Loading\u{2026}" : "Load more";
+            disabled: root.load == TabLoad.loading;
+            clicked => { BrowseState.tab-more(root.tab); }
+        }
     }
 }
 
@@ -339,18 +449,42 @@ export component ModDetailPage inherits Rectangle {
                 }
 
                 VerticalLayout {
-                    spacing: Theme.s1;
-                    Text {
-                        text: "Description";
-                        color: Theme.text;
-                        font-size: Theme.text-lg;
-                        font-weight: 600;
+                    spacing: Theme.s2;
+                    HorizontalLayout {
+                        alignment: start;
+                        for name[i] in ["Description", "Files", "Changelog", "Comments"]: TabButton {
+                            label: name;
+                            active: BrowseState.detail-tab == i;
+                            picked => { BrowseState.detail-tab-selected(i); }
+                        }
                     }
-                    Text {
+
+                    if BrowseState.detail-tab == 0: Text {
                         text: BrowseState.detail.description != "" ? BrowseState.detail.description : "No description.";
                         color: BrowseState.detail.description != "" ? Theme.text : Theme.text-faint;
                         font-size: Theme.text-md;
                         wrap: word-wrap;
+                    }
+                    if BrowseState.detail-tab == 1: RowsTab {
+                        tab: 1;
+                        rows: BrowseState.files;
+                        load: BrowseState.files-load;
+                        empty-text: "No files listed.";
+                    }
+                    if BrowseState.detail-tab == 2: RowsTab {
+                        tab: 2;
+                        rows: BrowseState.changes;
+                        load: BrowseState.changes-load;
+                        more: BrowseState.changes-more;
+                        empty-text: "No changelog entries.";
+                    }
+                    if BrowseState.detail-tab == 3: RowsTab {
+                        tab: 3;
+                        rows: BrowseState.comments;
+                        load: BrowseState.comments-load;
+                        more: BrowseState.comments-more;
+                        empty-text: "No comments yet.";
+                        hidden-text: "The author turned comments off for this mod.";
                     }
                 }
             }

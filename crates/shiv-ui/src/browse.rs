@@ -80,7 +80,7 @@ fn with_browse(f: impl FnOnce(&Rc<Browse>)) {
 // Formatting helpers (pure, unit-tested)
 
 /// `1234567` -> `1,234,567`.
-fn fmt_count(n: u64) -> String {
+pub(crate) fn fmt_count(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, c) in digits.chars().enumerate() {
@@ -97,7 +97,7 @@ fn fmt_mb(bytes: u64) -> String {
 }
 
 /// A download's size for the file picker; the API reports 0 when unknown.
-fn fmt_size(bytes: Option<u64>) -> String {
+pub(crate) fn fmt_size(bytes: Option<u64>) -> String {
     match bytes {
         None | Some(0) => "Size unknown".into(),
         Some(b) if b < 1_000_000 => format!("{} KB", b.div_ceil(1000)),
@@ -167,19 +167,24 @@ fn iso_to_epoch(iso: &str) -> Option<i64> {
 /// "5 days ago" style text for a timestamp, relative to `now` (epoch
 /// seconds). Anything in the future reads as "just now".
 pub(crate) fn relative_time(iso: &str, now: i64) -> Option<String> {
-    let secs = now - iso_to_epoch(iso)?;
+    Some(relative_secs(iso_to_epoch(iso)?, now))
+}
+
+/// [`relative_time`] for a Unix timestamp in seconds.
+pub(crate) fn relative_secs(then: i64, now: i64) -> String {
+    let secs = now - then;
     let (n, unit) = match secs {
-        ..60 => return Some("just now".to_owned()),
+        ..60 => return "just now".to_owned(),
         60..3600 => (secs / 60, "minute"),
         3600..86_400 => (secs / 3600, "hour"),
         86_400..2_592_000 => (secs / 86_400, "day"),
         2_592_000..31_536_000 => (secs / 2_592_000, "month"),
         _ => (secs / 31_536_000, "year"),
     };
-    Some(format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" }))
+    format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" })
 }
 
-fn now_epoch() -> i64 {
+pub(crate) fn now_epoch() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64)
@@ -1018,6 +1023,7 @@ pub fn attach(app: &App, api_url: &str) -> Arc<thumbs::Cache> {
     )])));
     state.set_mods(ModelRc::from(list.clone()));
     state.set_heroes(ModelRc::from(browse.hero_model.clone()));
+    crate::detail_tabs::attach(app);
     state.set_detail_row(ModelRc::new(DetailRow(list)));
 
     let handle = |f: fn(&Rc<Browse>)| move || with_browse(f);
@@ -1581,6 +1587,7 @@ impl Browse {
             thumbs: thumbs.clone(),
             obscured: HashMap::new(),
         });
+        crate::detail_tabs::open(&m.remote_id, m.is_audio);
         let info = detail_info(m);
         self.with_state(|s| {
             s.set_detail(info);
@@ -1625,6 +1632,7 @@ impl Browse {
     }
 
     fn drop_gallery(&self) {
+        crate::detail_tabs::close();
         let open = self.detail.borrow_mut().take().is_some();
         *self.list.detail.borrow_mut() = None;
         self.list.detail_notify.reset();

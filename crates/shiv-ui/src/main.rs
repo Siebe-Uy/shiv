@@ -7,6 +7,7 @@ use shiv_core::game::{self, GameError, GamePaths};
 mod browse;
 mod crosshair;
 mod describe;
+mod detail_tabs;
 mod installed;
 mod launch;
 mod performance;
@@ -1827,6 +1828,53 @@ mod tests {
         assert_eq!(app.get_screen(), 2);
         assert_eq!(state.get_return_screen(), -1);
         app.set_screen(0);
+
+        // The GameBanana tabs load on first use and reset when the page closes.
+        let gb = tiny_http::Server::http("127.0.0.1:0").expect("gb stub");
+        let gb_url = format!("http://{}", gb.server_addr().to_ip().expect("ip"));
+        std::thread::spawn(move || {
+            for req in gb.incoming_requests() {
+                let body = match req.url() {
+                    u if u.starts_with("/Mod/5/ProfilePage") => {
+                        r#"{"_aFiles":[{"_sFile":"main.zip","_nFilesize":2500000,"_tsDateAdded":1,"_nDownloadCount":9}]}"#
+                    }
+                    u if u.starts_with("/Mod/5/Updates") => {
+                        r#"{"_aMetadata":{"_nRecordCount":1,"_bIsComplete":true},"_aRecords":[{"_sName":"Fix","_sVersion":"1.1","_tsDateAdded":1,"_aChangeLog":[{"cat":"Bugfix","text":"Fixed it"}]}]}"#
+                    }
+                    _ => r#"{"_sErrorCode":"COMMENT_MODE_HIDDEN"}"#,
+                };
+                let _ = req.respond(tiny_http::Response::from_string(body));
+            }
+        });
+        detail_tabs::attach_with(&app, shiv_api::GameBananaClient::new(&gb_url));
+        assert!(browse::show_detail_from("m5", 0));
+        assert_eq!(state.get_detail_tab(), 0);
+        assert_eq!(state.get_files_load(), TabLoad::Idle);
+        state.invoke_detail_tab_selected(1);
+        assert!(run_until(&app, Duration::from_secs(5), |a| {
+            a.global::<BrowseState>().get_files_load() == TabLoad::Ready
+        }));
+        assert_eq!(state.get_files().row_count(), 1);
+        assert_eq!(
+            state.get_files().row_data(0).unwrap().title.as_str(),
+            "main.zip"
+        );
+        state.invoke_detail_tab_selected(2);
+        assert!(run_until(&app, Duration::from_secs(5), |a| {
+            a.global::<BrowseState>().get_changes_load() == TabLoad::Ready
+        }));
+        let change = state.get_changes().row_data(0).unwrap();
+        assert_eq!(change.title.as_str(), "Fix");
+        assert!(change.body.contains("Bugfix: Fixed it"));
+        assert!(!state.get_changes_more());
+        state.invoke_detail_tab_selected(3);
+        assert!(run_until(&app, Duration::from_secs(5), |a| {
+            a.global::<BrowseState>().get_comments_load() == TabLoad::Hidden
+        }));
+        click(&app, "Back");
+        assert_eq!(state.get_files().row_count(), 0);
+        assert_eq!(state.get_files_load(), TabLoad::Idle);
+        assert_eq!(state.get_detail_tab(), 0);
 
         // The author's page: Ada's mods only, then back to everything.
         assert!(browse::show_detail_from("m5", 2));
