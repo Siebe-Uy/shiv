@@ -72,6 +72,10 @@ Brand assets live in [`style/`](style/README.md).
 
 ## Credits
 
+A big thank you to the developers of the original
+[Deadlock Mod Manager](https://github.com/deadlock-mod-manager/deadlock-mod-manager).
+Shiv would not exist without their work, their API and the parsing code it builds on.
+
 Mod data comes from the [Deadlock Mods](https://deadlockmods.app) API, which mirrors
 [GameBanana](https://gamebanana.com). The VPK and Source 2 crates derive from the
 [Deadlock Mod Manager](https://github.com/deadlock-mod-manager/deadlock-mod-manager)

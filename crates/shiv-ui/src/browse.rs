@@ -127,6 +127,56 @@ pub(crate) fn short_date(iso: &str) -> Option<&str> {
     ok.then_some(date)
 }
 
+/// Seconds since the Unix epoch for an ISO-8601 UTC timestamp (`Z` and
+/// fractional seconds optional; a bare date means midnight).
+fn iso_to_epoch(iso: &str) -> Option<i64> {
+    let date = short_date(iso)?;
+    let num = |r: std::ops::Range<usize>| date.get(r)?.parse::<i64>().ok();
+    let (y, m, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let time = iso.get(11..).unwrap_or_default();
+    let part = |r: std::ops::Range<usize>| {
+        time.get(r)
+            .and_then(|t| t.parse::<i64>().ok())
+            .filter(|n| (0..60).contains(n))
+    };
+    let secs = if time.len() >= 8 {
+        part(0..2)? * 3600 + part(3..5)? * 60 + part(6..8)?
+    } else {
+        0
+    };
+    // Days from civil (Howard Hinnant's algorithm).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some((era * 146_097 + doe - 719_468) * 86_400 + secs)
+}
+
+/// "5 days ago" style text for a timestamp, relative to `now` (epoch
+/// seconds). Anything in the future reads as "just now".
+pub(crate) fn relative_time(iso: &str, now: i64) -> Option<String> {
+    let secs = now - iso_to_epoch(iso)?;
+    let (n, unit) = match secs {
+        ..60 => return Some("just now".to_owned()),
+        60..3600 => (secs / 60, "minute"),
+        3600..86_400 => (secs / 3600, "hour"),
+        86_400..2_592_000 => (secs / 86_400, "day"),
+        2_592_000..31_536_000 => (secs / 2_592_000, "month"),
+        _ => (secs / 31_536_000, "year"),
+    };
+    Some(format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" }))
+}
+
+fn now_epoch() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
+}
+
 /// Thumbnail URL for a mod. GameBanana screenshots are rewritten to their
 /// 530 px variant, which is a fraction of the full image's size.
 fn thumb_url(m: &ModDto) -> Option<String> {
@@ -159,6 +209,18 @@ struct GalleryImage {
     small: String,
 }
 
+impl GalleryImage {
+    /// The strip's source: the small variant, or the full image when the
+    /// small one failed (GameBanana only generates it for some screenshots).
+    fn strip_url(&self, cache: &thumbs::Cache) -> &str {
+        if cache.has_failed(&self.small) {
+            &self.full
+        } else {
+            &self.small
+        }
+    }
+}
+
 /// The gallery for a mod: its `images` (web URLs only, duplicates dropped, at
 /// most `GALLERY_MAX`), else its thumbnail.
 fn gallery_images(m: &ModDto) -> Vec<GalleryImage> {
@@ -188,6 +250,10 @@ fn gallery_images(m: &ModDto) -> Vec<GalleryImage> {
 
 /// The detail page's text, from the catalog entry.
 fn detail_info(m: &ModDto) -> ModDetail {
+    detail_info_at(m, now_epoch())
+}
+
+fn detail_info_at(m: &ModDto, now: i64) -> ModDetail {
     fn non_empty(s: &Option<String>) -> Option<&str> {
         s.as_deref().map(str::trim).filter(|s| !s.is_empty())
     }
@@ -211,7 +277,11 @@ fn detail_info(m: &ModDto) -> ModDetail {
         downloads: fmt_count(m.download_count).into(),
         likes: fmt_count(m.likes).into(),
         added: date(m.remote_added_at.as_deref()),
-        updated: date(m.last_updated()),
+        updated: m
+            .last_updated()
+            .and_then(|u| relative_time(u, now))
+            .unwrap_or_default()
+            .into(),
         description: m
             .description
             .as_deref()
@@ -404,7 +474,7 @@ struct Entry {
     name: String,
     byline: SharedString,
     stats: SharedString,
-    /// "Updated 2026-11-08", or empty when the catalog has no date.
+    /// "Updated 2 days ago", or empty when the catalog has no date.
     updated: SharedString,
     thumb_url: Option<String>,
     version: Option<String>,
@@ -414,6 +484,10 @@ struct Entry {
 
 impl Entry {
     fn from_dto(m: ModDto) -> Self {
+        Self::from_dto_at(m, now_epoch())
+    }
+
+    fn from_dto_at(m: ModDto, now: i64) -> Self {
         let byline = match (m.author.as_deref(), m.category.as_deref()) {
             (Some(a), Some(c)) => format!("{a} \u{b7} {c}"),
             (Some(a), None) => a.to_owned(),
@@ -427,7 +501,7 @@ impl Entry {
         );
         let updated = m
             .last_updated()
-            .and_then(short_date)
+            .and_then(|u| relative_time(u, now))
             .map(|d| format!("Updated {d}"))
             .unwrap_or_default();
         Entry {
@@ -1536,11 +1610,12 @@ impl Browse {
         let detail = self.detail.borrow();
         let Some(d) = detail.as_ref() else { return };
         for (i, g) in d.images.iter().enumerate() {
-            let shown = match self.list.cache.get(&g.small) {
-                Some(img) => self.list.display_thumb(&g.small, &img, d.nsfw),
+            let url = g.strip_url(&self.list.cache);
+            let shown = match self.list.cache.get(url) {
+                Some(img) => self.list.display_thumb(url, &img, d.nsfw),
                 None => {
-                    if !self.list.cache.has_failed(&g.small) {
-                        self.list.loader.request(&g.small);
+                    if !self.list.cache.has_failed(url) {
+                        self.list.loader.request(url);
                     }
                     None
                 }
@@ -1561,7 +1636,7 @@ impl Browse {
             .detail
             .borrow()
             .as_ref()
-            .is_some_and(|d| d.images.iter().any(|g| g.small == url));
+            .is_some_and(|d| d.images.iter().any(|g| g.small == url || g.full == url));
         if wanted {
             self.refresh_strip();
         }
@@ -1797,6 +1872,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn strip_falls_back_to_the_full_image_when_the_small_variant_fails() {
+        let cache = thumbs::Cache::with_fetcher(1 << 20, |_| None);
+        let g = GalleryImage {
+            full: "https://images.gamebanana.com/img/ss/mods/a.jpg".into(),
+            small: "https://images.gamebanana.com/img/ss/mods/530-90_a.jpg".into(),
+        };
+        assert_eq!(g.strip_url(&cache), g.small);
+        assert!(cache.get_or_fetch(&g.small).is_none());
+        assert_eq!(g.strip_url(&cache), g.full);
+    }
+
+    #[test]
+    fn relative_time_reads_like_a_person_would() {
+        let now = iso_to_epoch("2026-11-11T12:00:00.000Z").unwrap();
+        let r = |iso: &str| relative_time(iso, now).unwrap();
+        assert_eq!(r("2026-11-11T11:59:30Z"), "just now");
+        assert_eq!(r("2026-11-11T11:59:00Z"), "1 minute ago");
+        assert_eq!(r("2026-11-11T09:00:00Z"), "3 hours ago");
+        assert_eq!(r("2026-11-06T12:00:00Z"), "5 days ago");
+        assert_eq!(r("2026-10-10"), "1 month ago");
+        assert_eq!(r("2024-11-11"), "2 years ago");
+        assert_eq!(r("2027-01-01"), "just now");
+        assert_eq!(relative_time("soon", now), None);
+        assert_eq!(iso_to_epoch("1970-01-02T00:00:01Z"), Some(86_401));
+    }
+
+    #[test]
     fn counts_are_grouped_by_thousands() {
         assert_eq!(fmt_count(0), "0");
         assert_eq!(fmt_count(999), "999");
@@ -1841,17 +1943,18 @@ mod tests {
             files_updated_at: files.map(str::to_owned),
             ..ModDto::default()
         };
-        let updated = |d| Entry::from_dto(d).updated.to_string();
+        let now = iso_to_epoch("2026-11-10T00:00:00Z").unwrap();
+        let updated = |d| Entry::from_dto_at(d, now).updated.to_string();
         assert_eq!(
             updated(m(
                 Some("2026-11-08T01:00:00Z"),
                 Some("2025-01-01T00:00:00Z")
             )),
-            "Updated 2026-11-08"
+            "Updated 2 days ago"
         );
         assert_eq!(
             updated(m(None, Some("2025-01-01T00:00:00Z"))),
-            "Updated 2025-01-01"
+            "Updated 1 year ago"
         );
         assert_eq!(updated(m(None, None)), "");
         assert_eq!(
@@ -1920,13 +2023,14 @@ mod tests {
             remote_url: Some("http://gamebanana.com/mods/1".into()),
             ..ModDto::default()
         };
-        let d = detail_info(&m);
+        let now = iso_to_epoch("2026-03-10T00:00:00Z").unwrap();
+        let d = detail_info_at(&m, now);
         assert_eq!(d.author.as_str(), "");
         assert_eq!(d.kind.as_str(), "Skins \u{b7} Haze");
         assert_eq!(d.tags.as_str(), "a, b");
         assert_eq!(d.likes.as_str(), "1,500");
         assert_eq!(d.added.as_str(), "2026-01-02");
-        assert_eq!(d.updated.as_str(), "2026-03-04");
+        assert_eq!(d.updated.as_str(), "6 days ago");
         assert_eq!(d.description.as_str(), "Hi there");
         // Only https links are offered.
         assert!(!d.has_link);

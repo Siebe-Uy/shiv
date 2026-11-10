@@ -1798,10 +1798,8 @@ mod tests {
         assert_eq!(d.kind.as_str(), "Skins \u{b7} Haze");
         assert_eq!(d.tags.as_str(), "Sound, Funny");
         assert_eq!((d.downloads.as_str(), d.likes.as_str()), ("1,234", "56"));
-        assert_eq!(
-            (d.added.as_str(), d.updated.as_str()),
-            ("2026-10-01", "2026-11-05")
-        );
+        assert_eq!(d.added.as_str(), "2026-10-01");
+        assert!(d.updated.ends_with(" ago"), "{}", d.updated);
         assert_eq!(
             d.description.as_str(),
             "Hello & welcome.\n\n\u{2022} One\n\u{2022} Two\nlink"
