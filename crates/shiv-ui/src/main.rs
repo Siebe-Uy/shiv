@@ -299,7 +299,7 @@ mod tests {
                 version: None,
                 thumbnail_url: None,
                 vpks: vec!["pak01_dir.vpk".into()],
-                nsfw: false,
+                nsfw: None,
             },
         )
         .unwrap();
@@ -1339,7 +1339,7 @@ mod tests {
                 version: Some("1.0".into()),
                 thumbnail_url: None,
                 vpks: vec!["pak01_dir.vpk".into()],
-                nsfw: false,
+                nsfw: None,
             },
         )
         .expect("sidecar");
@@ -2014,7 +2014,8 @@ mod tests {
     /// Installed thumbnails follow Show NSFW too: a mod whose sidecar
     /// records NSFW and an older sidecar whose mod the catalog marks NSFW
     /// are blurred, the switch on Browse unblurs them, and without a loaded
-    /// catalog an unflagged mod counts as not NSFW.
+    /// catalog an older sidecar (no flag) is blurred until the catalog says
+    /// it is not NSFW.
     fn installed_nsfw_flow(api: &str) {
         use shiv_core::game::GamePaths;
         use shiv_core::sidecar::{self, Sidecar};
@@ -2025,11 +2026,13 @@ mod tests {
         std::fs::create_dir_all(&paths.addons).expect("addons");
         let thumb = format!("{api}/t.png");
         for (i, (id, name, nsfw)) in [
-            ("m1", "Plain Mod", false),
+            ("m1", "Plain Mod", Some(false)),
             // Installed before the flag existed; the catalog marks m2 NSFW.
-            ("m2", "Old Spicy", false),
+            ("m2", "Old Spicy", None),
+            // Installed before the flag existed; the catalog says not NSFW.
+            ("m3", "Old Plain", None),
             // Flagged at install; no longer in the catalog.
-            ("gone", "Flagged Spicy", true),
+            ("gone", "Flagged Spicy", Some(true)),
         ]
         .into_iter()
         .enumerate()
@@ -2077,6 +2080,7 @@ mod tests {
         app.set_screen(1);
         let shown = move |a: &App| {
             width(a, "Plain Mod") == full
+                && width(a, "Old Plain") == full
                 && width(a, "Old Spicy") == blurred
                 && width(a, "Flagged Spicy") == blurred
         };
@@ -2088,11 +2092,12 @@ mod tests {
         assert_eq!(width(&app, "Old Spicy"), full);
         assert_eq!(width(&app, "Flagged Spicy"), full);
         assert_eq!(width(&app, "Plain Mod"), full);
+        assert_eq!(width(&app, "Old Plain"), full);
         browse_state.invoke_toggle_nsfw();
         assert!(shown(&app));
 
-        // No catalog (service unreachable): the recorded flag still blurs,
-        // an unflagged mod is shown as not NSFW.
+        // No catalog (service unreachable): fail closed. Recorded NSFW and
+        // both older sidecars are blurred; only recorded not-NSFW is shown.
         let app2 = App::new().expect("app");
         let cache2 = browse::attach(&app2, "http://127.0.0.1:9");
         installed::attach_with(&app2, cache2, deps(&paths));
@@ -2102,8 +2107,17 @@ mod tests {
         }));
         app2.set_screen(1);
         assert!(run_until(&app2, Duration::from_secs(20), move |a| {
-            width(a, "Flagged Spicy") == blurred && width(a, "Old Spicy") == full
+            width(a, "Flagged Spicy") == blurred
+                && width(a, "Old Spicy") == blurred
+                && width(a, "Old Plain") == blurred
+                && width(a, "Plain Mod") == full
         }));
+        // Once a catalog loads, the older sidecar it calls not NSFW unblurs.
+        browse::test_hooks::catalog_loaded_with_nsfw(&["m2"]);
+        assert_eq!(width(&app2, "Old Plain"), full);
+        assert_eq!(width(&app2, "Old Spicy"), blurred);
+        assert_eq!(width(&app2, "Flagged Spicy"), blurred);
+        assert_eq!(width(&app2, "Plain Mod"), full);
     }
 
     /// NSFW mods are listed with a tag and a blurred thumbnail; Show NSFW

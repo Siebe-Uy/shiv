@@ -9,7 +9,7 @@ fn sc(id: &str, vpks: &[&str]) -> Sidecar {
         version: Some("1.0".into()),
         thumbnail_url: None,
         vpks: vpks.iter().map(|s| s.to_string()).collect(),
-        nsfw: false,
+        nsfw: None,
     }
 }
 
@@ -23,12 +23,23 @@ fn write_then_read_roundtrips() {
 }
 
 #[test]
-fn nsfw_flag_roundtrips_and_old_sidecars_read_as_not_nsfw() {
+fn nsfw_flag_roundtrips_and_old_sidecars_read_as_unknown() {
     let d = tempdir().unwrap();
-    let mut s = sc("spicy", &["pak01_dir.vpk"]);
-    s.nsfw = true;
-    sidecar::write(d.path(), &s).unwrap();
-    assert_eq!(sidecar::read(d.path(), "spicy").unwrap(), Some(s));
+    for (id, flag) in [
+        ("spicy", Some(true)),
+        ("plain", Some(false)),
+        ("unknown", None),
+    ] {
+        let mut s = sc(id, &["pak01_dir.vpk"]);
+        s.nsfw = flag;
+        sidecar::write(d.path(), &s).unwrap();
+        assert_eq!(sidecar::read(d.path(), id).unwrap(), Some(s));
+    }
+    // Unknown is not written, so the file matches what older builds wrote.
+    let raw = fs::read_to_string(d.path().join(".shiv/unknown.json")).unwrap();
+    assert!(!raw.contains("nsfw"), "{raw}");
+    let raw = fs::read_to_string(d.path().join(".shiv/plain.json")).unwrap();
+    assert!(raw.contains("\"nsfw\": false"), "{raw}");
     // Written before the field existed.
     fs::write(
         d.path().join(".shiv/old.json"),
@@ -36,7 +47,7 @@ fn nsfw_flag_roundtrips_and_old_sidecars_read_as_not_nsfw() {
     )
     .unwrap();
     let old = sidecar::read(d.path(), "old").unwrap().unwrap();
-    assert!(!old.nsfw);
+    assert_eq!(old.nsfw, None);
     assert_eq!(old.vpks, ["pak02_dir.vpk"]);
 }
 

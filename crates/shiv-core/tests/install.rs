@@ -113,13 +113,13 @@ fn install_records_the_nsfw_flag() {
     let mut m = meta("spicy");
     m.nsfw = true;
     let sc = install::install_with(&a, m, &e.paths, not_running).unwrap();
-    assert!(sc.nsfw);
-    assert!(
-        sidecar::read(&e.paths.addons, "spicy")
-            .unwrap()
-            .unwrap()
-            .nsfw
-    );
+    assert_eq!(sc.nsfw, Some(true));
+    let read = sidecar::read(&e.paths.addons, "spicy").unwrap().unwrap();
+    assert_eq!(read.nsfw, Some(true));
+    // Not NSFW is recorded too, distinct from unknown.
+    let b = zip_in(&e, &[("other.vpk", b"VPKDATA")]);
+    let plain = install::install_with(&b, meta("plain"), &e.paths, not_running).unwrap();
+    assert_eq!(plain.nsfw, Some(false));
 }
 
 #[test]
@@ -584,7 +584,7 @@ fn sidecar_with_traversal_vpk_name_deletes_nothing_outside_addons() {
             "../victim.vpk".into(),
             abs.to_string_lossy().into_owned(),
         ],
-        nsfw: false,
+        nsfw: None,
     };
     fs::write(e.paths.addons.join("pak01_dir.vpk"), b"x").unwrap();
     sidecar::write(&e.paths.addons, &evil).unwrap();

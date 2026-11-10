@@ -43,10 +43,11 @@ pub struct Sidecar {
     pub thumbnail_url: Option<String>,
     /// VPK file names without the `.disabled` suffix.
     pub vpks: Vec<String>,
-    /// The catalog marked the mod NSFW when it was installed. Absent in
-    /// sidecars written before this field existed (read as false).
-    #[serde(default)]
-    pub nsfw: bool,
+    /// Whether the catalog marked the mod NSFW when it was installed.
+    /// `None` in sidecars written before this field existed (unknown); not
+    /// written when `None`, so older Shiv builds read new sidecars too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nsfw: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

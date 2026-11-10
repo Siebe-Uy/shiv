@@ -169,7 +169,7 @@ pub fn install_with_limits(
         version: meta.version,
         thumbnail_url: meta.thumbnail_url,
         vpks: new_names,
-        nsfw: meta.nsfw,
+        nsfw: Some(meta.nsfw),
     };
     if let Err(e) = sidecar::write(addons_dir, &new_sidecar) {
         rollback(&moved);

@@ -71,8 +71,19 @@ pub(crate) struct Entry {
     /// Every VPK of the mod is enabled.
     pub enabled: bool,
     pub thumb_url: Option<String>,
-    /// The sidecar records the mod as NSFW.
-    pub nsfw: bool,
+    /// What the sidecar records about NSFW; `None` when it predates the flag.
+    pub nsfw: Option<bool>,
+}
+
+/// Whether a row's thumbnail counts as NSFW, from the sidecar's flag and the
+/// loaded catalog (`None` when none has loaded). Either saying NSFW wins; a
+/// mod with no recorded flag and no catalog to ask is blurred (fail closed).
+pub(crate) fn is_nsfw(recorded: Option<bool>, catalog: Option<bool>) -> bool {
+    match (recorded, catalog) {
+        (Some(true), _) | (_, Some(true)) => true,
+        (None, None) => true,
+        (Some(false), _) | (None, Some(false)) => false,
+    }
 }
 
 fn enabled_file_name(vpk: &addons::InstalledVpk) -> String {
@@ -104,7 +115,7 @@ fn entry(m: &InstalledMod) -> Entry {
             managed: false,
             enabled,
             thumb_url: None,
-            nsfw: false,
+            nsfw: None,
         };
     };
     let mut parts: Vec<String> = Vec::new();
@@ -322,9 +333,7 @@ impl Installed {
             ..InstalledRow::default()
         };
         if let Some(img) = e.thumb_url.as_deref().and_then(|u| self.cache.get(u)) {
-            // Mods installed before the flag was recorded fall back to the
-            // catalog; unknown counts as not NSFW.
-            let nsfw = e.nsfw || crate::browse::catalog_nsfw(&e.id).unwrap_or(false);
+            let nsfw = is_nsfw(e.nsfw, crate::browse::catalog_nsfw(&e.id));
             let shown = if nsfw && !crate::browse::show_nsfw() {
                 // Blurred like Browse; no blurred copy means no thumbnail.
                 thumbs::obscured(&img).map(|b| to_slint(&b))
@@ -546,8 +555,20 @@ mod tests {
             version: Some("1.2".into()),
             thumbnail_url: Some("https://x.test/t.png".into()),
             vpks: Vec::new(),
-            nsfw: false,
+            nsfw: None,
         }
+    }
+
+    #[test]
+    fn nsfw_fails_closed_when_unknown() {
+        assert!(is_nsfw(Some(true), None));
+        assert!(is_nsfw(Some(true), Some(false)));
+        assert!(is_nsfw(Some(false), Some(true)));
+        assert!(is_nsfw(None, Some(true)));
+        assert!(is_nsfw(None, None), "legacy sidecar, no catalog");
+        assert!(!is_nsfw(None, Some(false)));
+        assert!(!is_nsfw(Some(false), None));
+        assert!(!is_nsfw(Some(false), Some(false)));
     }
 
     #[test]

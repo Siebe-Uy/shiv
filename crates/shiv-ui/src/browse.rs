@@ -1682,6 +1682,14 @@ pub(crate) mod test_hooks {
     }
 
     /// What the download-list request delivers for the current request of `id`.
+    /// What a catalog load does for NSFW: record the NSFW ids, tell Installed.
+    pub fn catalog_loaded_with_nsfw(ids: &[&str]) {
+        with_browse(|b| {
+            *b.nsfw_ids.borrow_mut() = Some(ids.iter().map(|s| (*s).to_owned()).collect());
+        });
+        crate::installed::nsfw_changed();
+    }
+
     /// The picker is open for a mod that has since left the list; pick a file.
     pub fn pick_for_vanished_mod() {
         with_browse(|b| {
