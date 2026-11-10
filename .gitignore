@@ -1,2 +1,24 @@
-target/
+# Build output
+/target/
+/dist/
+
+# AI assistant tooling and plans
+.claude/
+CLAUDE.md
 .superpowers/
+docs/superpowers/
+
+# Environment and secrets
+.env
+.env.*
+
+# Logs and scratch
+*.log
+*.tmp
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
