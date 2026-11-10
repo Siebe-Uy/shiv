@@ -1,0 +1,34 @@
+# Maintainer: Siebe-Uy (https://github.com/Siebe-Uy)
+#
+# Prebuilt Shiv: unpacks the release AppImage and installs the binary, desktop
+# entry and icon the normal way, so no FUSE is needed to run it.
+# After a new release: bump pkgver, then run `updpkgsums` and `makepkg --printsrcinfo > .SRCINFO`.
+pkgname=shiv-bin
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Lean, fast Deadlock mod manager built in Rust (prebuilt)"
+arch=('x86_64')
+url="https://github.com/Siebe-Uy/shiv"
+license=('GPL-3.0-only')
+depends=('fontconfig' 'gcc-libs' 'libx11' 'libxcb' 'libxkbcommon' 'libxkbcommon-x11' 'wayland')
+provides=('shiv')
+conflicts=('shiv' 'shiv-git')
+options=('!strip')
+source=("Shiv-${pkgver}-x86_64.AppImage::${url}/releases/download/v${pkgver}/Shiv-${pkgver}-x86_64.AppImage"
+        "LICENSE-${pkgver}::${url}/raw/v${pkgver}/LICENSE")
+noextract=("Shiv-${pkgver}-x86_64.AppImage")
+sha256sums=('SKIP'
+            'SKIP')
+
+prepare() {
+  chmod +x "Shiv-${pkgver}-x86_64.AppImage"
+  "./Shiv-${pkgver}-x86_64.AppImage" --appimage-extract >/dev/null
+}
+
+package() {
+  cd squashfs-root
+  install -Dm755 usr/bin/shiv "${pkgdir}/usr/bin/shiv"
+  install -Dm644 usr/share/applications/shiv.desktop "${pkgdir}/usr/share/applications/shiv.desktop"
+  install -Dm644 usr/share/icons/hicolor/256x256/apps/shiv.png "${pkgdir}/usr/share/icons/hicolor/256x256/apps/shiv.png"
+  install -Dm644 "${srcdir}/LICENSE-${pkgver}" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}

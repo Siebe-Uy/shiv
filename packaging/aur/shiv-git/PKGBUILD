@@ -1,0 +1,45 @@
+# Maintainer: Siebe-Uy (https://github.com/Siebe-Uy)
+#
+# Shiv built from the latest source. Prefer shiv-bin unless you want main.
+pkgname=shiv-git
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Lean, fast Deadlock mod manager built in Rust (git version)"
+arch=('x86_64')
+url="https://github.com/Siebe-Uy/shiv"
+license=('GPL-3.0-only')
+depends=('fontconfig' 'gcc-libs' 'libx11' 'libxcb' 'libxkbcommon' 'libxkbcommon-x11' 'wayland')
+makedepends=('cargo' 'git' 'librsvg')
+provides=('shiv')
+conflicts=('shiv' 'shiv-bin')
+source=("${pkgname}::git+${url}.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "${pkgname}"
+  printf '%s.r%s.g%s' \
+    "$(sed -n 's/^version = "\(.*\)"/\1/p' crates/shiv-ui/Cargo.toml | head -1)" \
+    "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+prepare() {
+  cd "${pkgname}"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "${pkgname}"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --release --frozen -p shiv-ui
+}
+
+package() {
+  cd "${pkgname}"
+  install -Dm755 target/release/shiv "${pkgdir}/usr/bin/shiv"
+  install -Dm644 packaging/shiv.desktop "${pkgdir}/usr/share/applications/shiv.desktop"
+  rsvg-convert -w 256 -h 256 style/svg/shiv-icon.svg -o shiv.png
+  install -Dm644 shiv.png "${pkgdir}/usr/share/icons/hicolor/256x256/apps/shiv.png"
+  install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}

@@ -18,16 +18,20 @@ gigabytes of RAM. Shiv does the essentials and nothing else.
 
 ## Features
 
-- **Browse** the Deadlock Mods catalog with search, sorting, category filter, pagination,
-  thumbnails and a detail page with an image gallery.
-- **Install** mods from zip, rar, 7z and multi-VPK archives, with a file picker when a
-  mod offers several downloads.
-- **Enable and disable** mods. A mod is just a VPK in `citadel/addons`, so toggling is
-  a rename and load order never changes.
+- **Browse** the Deadlock Mods catalog with search, sorting, category and hero filters, pagination and
+  thumbnails. Pick several heroes at once.
+- **Mod pages** with an image gallery, description, **Files**, **Changelog** and **Comments** tabs,
+  the author's **Ko-fi** (or Patreon, Buy Me a Coffee, PayPal) link when they have one, and a link
+  from the author's name to all of their mods. "Updated 5 days ago" instead of raw dates.
+- **Install** mods from zip, rar, 7z and multi-VPK archives, with a file picker when a mod offers
+  several downloads, and a **Downloads** screen with progress, speed, cancel and retry.
+- **Installed** mods open their detail page when clicked. Enable, disable and uninstall from there.
+- **Profiles.** Keep separate sets of mods (a "sweaty" setup, a "just for fun" one) and switch
+  between them from the sidebar. Each profile has its own addons folder, so nothing leaks between them.
+- **Launch** the game through Steam, or **Launch without mods** for a clean session; your mods
+  come back when the game closes.
 - **Fix broken mods.** A health check finds truncated, partial or duplicate VPKs, and a
   repair step fixes mods broken by game updates, with a preview before anything changes.
-- **Launch** the game through Steam. The health check runs first and warns you instead
-  of blocking you.
 - **Crosshairs** with a live preview, applied as `citadel_crosshair_*` values.
 - **Performance presets** (pretty, balanced, sweaty, potato) and per-setting editing,
   written to the game's `GameInfo` file.
@@ -37,7 +41,24 @@ Notes on the toolkit choice and repair port are in [`docs/`](docs/).
 
 ## Install
 
-> Pre-built packages are being set up. Until the first release, build from source.
+### Arch Linux (AUR)
+
+```sh
+yay -S shiv-bin      # prebuilt
+yay -S shiv-git      # built from the latest source
+```
+
+### Any Linux: AppImage
+
+Download `Shiv-<version>-x86_64.AppImage` from the
+[latest release](https://github.com/Siebe-Uy/shiv/releases/latest), then:
+
+```sh
+chmod +x Shiv-*-x86_64.AppImage
+./Shiv-*-x86_64.AppImage
+```
+
+A `.sha256` file sits next to it if you want to verify the download.
 
 ## Build from source
 
@@ -47,7 +68,7 @@ windowing libraries (Wayland or X11, `libxkbcommon`, `fontconfig`).
 ```sh
 git clone git@github.com:Siebe-Uy/shiv.git
 cd shiv
-cargo run --release -p shiv-ui
+cargo run --release -p shiv-ui      # the binary is target/release/shiv
 ```
 
 Run the tests:
@@ -63,12 +84,12 @@ Shiv locates Deadlock through your Steam library automatically.
 | Crate | Purpose |
 |---|---|
 | `shiv-ui` | The Slint application: screens, state and thumbnail pipeline |
-| `shiv-core` | Game detection, install, enable/disable, health checks, launch, crosshair, performance |
-| `shiv-api` | Client for the [Deadlock Mods API](https://api.deadlockmods.app) |
+| `shiv-core` | Game detection, install, enable/disable, profiles, health checks, launch, crosshair, performance |
+| `shiv-api` | Clients for the [Deadlock Mods API](https://api.deadlockmods.app) and GameBanana (files, changelog, comments) |
 | `shiv-repair` | Content repair for VPKs broken by game updates |
 | `vpkmanager`, `vpk-parser`, `kv-parser`, `source2-model` | VPK, KeyValues and Source 2 parsing, copied from the Deadlock Mod Manager |
 
-Brand assets live in [`style/`](style/README.md).
+Brand assets live in [`style/`](style/README.md). Packaging (AppImage, AUR) is in [`packaging/`](packaging/).
 
 ## Credits
 
