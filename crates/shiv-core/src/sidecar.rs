@@ -43,6 +43,10 @@ pub struct Sidecar {
     pub thumbnail_url: Option<String>,
     /// VPK file names without the `.disabled` suffix.
     pub vpks: Vec<String>,
+    /// The catalog marked the mod NSFW when it was installed. Absent in
+    /// sidecars written before this field existed (read as false).
+    #[serde(default)]
+    pub nsfw: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

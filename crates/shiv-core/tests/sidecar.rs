@@ -9,6 +9,7 @@ fn sc(id: &str, vpks: &[&str]) -> Sidecar {
         version: Some("1.0".into()),
         thumbnail_url: None,
         vpks: vpks.iter().map(|s| s.to_string()).collect(),
+        nsfw: false,
     }
 }
 
@@ -19,6 +20,24 @@ fn write_then_read_roundtrips() {
     sidecar::write(d.path(), &s).unwrap();
     assert_eq!(sidecar::read(d.path(), "abc-1").unwrap(), Some(s));
     assert_eq!(sidecar::read(d.path(), "nope").unwrap(), None);
+}
+
+#[test]
+fn nsfw_flag_roundtrips_and_old_sidecars_read_as_not_nsfw() {
+    let d = tempdir().unwrap();
+    let mut s = sc("spicy", &["pak01_dir.vpk"]);
+    s.nsfw = true;
+    sidecar::write(d.path(), &s).unwrap();
+    assert_eq!(sidecar::read(d.path(), "spicy").unwrap(), Some(s));
+    // Written before the field existed.
+    fs::write(
+        d.path().join(".shiv/old.json"),
+        r#"{"mod_id":"old","name":"Old","version":null,"thumbnail_url":null,"vpks":["pak02_dir.vpk"]}"#,
+    )
+    .unwrap();
+    let old = sidecar::read(d.path(), "old").unwrap().unwrap();
+    assert!(!old.nsfw);
+    assert_eq!(old.vpks, ["pak02_dir.vpk"]);
 }
 
 #[test]

@@ -34,6 +34,7 @@ fn meta(id: &str) -> ModMeta {
         name: format!("Mod {id}"),
         version: Some("1.0".into()),
         thumbnail_url: None,
+        nsfw: false,
     }
 }
 
@@ -103,6 +104,22 @@ fn installs_zip_with_one_vpk() {
     assert_eq!(names(&e.paths.addons), vec!["pak01_dir.vpk"]);
     assert_eq!(sidecar::read(&e.paths.addons, "m1").unwrap(), Some(sc));
     assert!(!e.paths.addons.join(".shiv/tmp").exists());
+}
+
+#[test]
+fn install_records_the_nsfw_flag() {
+    let e = env();
+    let a = zip_in(&e, &[("skin.vpk", b"VPKDATA")]);
+    let mut m = meta("spicy");
+    m.nsfw = true;
+    let sc = install::install_with(&a, m, &e.paths, not_running).unwrap();
+    assert!(sc.nsfw);
+    assert!(
+        sidecar::read(&e.paths.addons, "spicy")
+            .unwrap()
+            .unwrap()
+            .nsfw
+    );
 }
 
 #[test]
@@ -567,6 +584,7 @@ fn sidecar_with_traversal_vpk_name_deletes_nothing_outside_addons() {
             "../victim.vpk".into(),
             abs.to_string_lossy().into_owned(),
         ],
+        nsfw: false,
     };
     fs::write(e.paths.addons.join("pak01_dir.vpk"), b"x").unwrap();
     sidecar::write(&e.paths.addons, &evil).unwrap();

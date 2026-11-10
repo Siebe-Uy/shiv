@@ -231,6 +231,7 @@ mod tests {
         let api = stub_api();
         install_cancel_and_failure(&api);
         nsfw_flow(&api);
+        installed_nsfw_flow(&api);
         download_picker_flow(&api);
         detail_flow();
         installed_screen();
@@ -298,6 +299,7 @@ mod tests {
                 version: None,
                 thumbnail_url: None,
                 vpks: vec!["pak01_dir.vpk".into()],
+                nsfw: false,
             },
         )
         .unwrap();
@@ -1291,6 +1293,7 @@ mod tests {
                 version: Some("1.0".into()),
                 thumbnail_url: None,
                 vpks: vec!["pak01_dir.vpk".into()],
+                nsfw: false,
             },
         )
         .expect("sidecar");
@@ -1960,6 +1963,101 @@ mod tests {
         );
         click(&app, "Back");
         assert_eq!(hooks::gallery_usage(), (0, 0));
+    }
+
+    /// Installed thumbnails follow Show NSFW too: a mod whose sidecar
+    /// records NSFW and an older sidecar whose mod the catalog marks NSFW
+    /// are blurred, the switch on Browse unblurs them, and without a loaded
+    /// catalog an unflagged mod counts as not NSFW.
+    fn installed_nsfw_flow(api: &str) {
+        use shiv_core::game::GamePaths;
+        use shiv_core::sidecar::{self, Sidecar};
+        use std::sync::Arc;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let paths = GamePaths::from_root(root.path().to_path_buf());
+        std::fs::create_dir_all(&paths.addons).expect("addons");
+        let thumb = format!("{api}/t.png");
+        for (i, (id, name, nsfw)) in [
+            ("m1", "Plain Mod", false),
+            // Installed before the flag existed; the catalog marks m2 NSFW.
+            ("m2", "Old Spicy", false),
+            // Flagged at install; no longer in the catalog.
+            ("gone", "Flagged Spicy", true),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let vpk = format!("pak{:02}_dir.vpk", i + 1);
+            std::fs::write(paths.addons.join(&vpk), b"x").expect("vpk");
+            sidecar::write(
+                &paths.addons,
+                &Sidecar {
+                    mod_id: id.into(),
+                    name: name.into(),
+                    version: None,
+                    thumbnail_url: Some(thumb.clone()),
+                    vpks: vec![vpk],
+                    nsfw,
+                },
+            )
+            .expect("sidecar");
+        }
+        let deps = |p: &GamePaths| {
+            let located = p.clone();
+            installed::Deps {
+                locate: Arc::new(move || Ok(located.clone())),
+                running: Arc::new(|| false),
+            }
+        };
+        let width = |a: &App, name: &str| {
+            a.global::<InstalledState>()
+                .get_rows()
+                .iter()
+                .find(|r| r.name.as_str() == name)
+                .filter(|r| r.has_thumb)
+                .map(|r| r.thumb.size().width)
+        };
+        let blurred = Some(thumbs::OBSCURED_W);
+        let full = Some(thumbs::DISPLAY_W);
+
+        let app = App::new().expect("app");
+        let cache = browse::attach(&app, api);
+        installed::attach_with(&app, cache, deps(&paths));
+        app.show().expect("show");
+        let catalog_ready =
+            |a: &App| a.global::<BrowseState>().get_load_state() == LoadState::Ready;
+        assert!(run_until(&app, Duration::from_secs(20), catalog_ready));
+        app.set_screen(1);
+        let shown = move |a: &App| {
+            width(a, "Plain Mod") == full
+                && width(a, "Old Spicy") == blurred
+                && width(a, "Flagged Spicy") == blurred
+        };
+        assert!(run_until(&app, Duration::from_secs(20), shown));
+
+        // The Browse switch unblurs Installed too, and blurs it again.
+        let browse_state = app.global::<BrowseState>();
+        browse_state.invoke_toggle_nsfw();
+        assert_eq!(width(&app, "Old Spicy"), full);
+        assert_eq!(width(&app, "Flagged Spicy"), full);
+        assert_eq!(width(&app, "Plain Mod"), full);
+        browse_state.invoke_toggle_nsfw();
+        assert!(shown(&app));
+
+        // No catalog (service unreachable): the recorded flag still blurs,
+        // an unflagged mod is shown as not NSFW.
+        let app2 = App::new().expect("app");
+        let cache2 = browse::attach(&app2, "http://127.0.0.1:9");
+        installed::attach_with(&app2, cache2, deps(&paths));
+        app2.show().expect("show");
+        assert!(run_until(&app2, Duration::from_secs(20), |a| {
+            a.global::<BrowseState>().get_load_state() == LoadState::Failed
+        }));
+        app2.set_screen(1);
+        assert!(run_until(&app2, Duration::from_secs(20), move |a| {
+            width(a, "Flagged Spicy") == blurred && width(a, "Old Spicy") == full
+        }));
     }
 
     /// NSFW mods are listed with a tag and a blurred thumbnail; Show NSFW

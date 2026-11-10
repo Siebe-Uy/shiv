@@ -1257,6 +1257,7 @@ mod tests {
                 version: None,
                 thumbnail_url: None,
                 vpks: vec!["pak01_dir.vpk".into()],
+                nsfw: false,
             },
         )
         .unwrap();

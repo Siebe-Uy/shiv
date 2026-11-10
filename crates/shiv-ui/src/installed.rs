@@ -71,6 +71,8 @@ pub(crate) struct Entry {
     /// Every VPK of the mod is enabled.
     pub enabled: bool,
     pub thumb_url: Option<String>,
+    /// The sidecar records the mod as NSFW.
+    pub nsfw: bool,
 }
 
 fn enabled_file_name(vpk: &addons::InstalledVpk) -> String {
@@ -102,6 +104,7 @@ fn entry(m: &InstalledMod) -> Entry {
             managed: false,
             enabled,
             thumb_url: None,
+            nsfw: false,
         };
     };
     let mut parts: Vec<String> = Vec::new();
@@ -135,6 +138,7 @@ fn entry(m: &InstalledMod) -> Entry {
         managed: true,
         enabled,
         thumb_url: s.thumbnail_url.clone().filter(|u| !u.is_empty()),
+        nsfw: s.nsfw,
     }
 }
 
@@ -277,6 +281,12 @@ pub(crate) fn attach_with(app: &App, cache: Arc<thumbs::Cache>, deps: Deps) {
     });
 }
 
+/// The Show NSFW switch flipped or the catalog loaded: re-blur or unblur
+/// the Installed thumbnails.
+pub(crate) fn nsfw_changed() {
+    with_installed(|i| i.rebuild_rows());
+}
+
 impl Installed {
     fn with_state(&self, f: impl FnOnce(&InstalledState<'_>)) {
         if let Some(app) = self.weak.upgrade() {
@@ -312,10 +322,31 @@ impl Installed {
             ..InstalledRow::default()
         };
         if let Some(img) = e.thumb_url.as_deref().and_then(|u| self.cache.get(u)) {
-            row.thumb = to_slint(&img);
-            row.has_thumb = true;
+            // Mods installed before the flag was recorded fall back to the
+            // catalog; unknown counts as not NSFW.
+            let nsfw = e.nsfw || crate::browse::catalog_nsfw(&e.id).unwrap_or(false);
+            let shown = if nsfw && !crate::browse::show_nsfw() {
+                // Blurred like Browse; no blurred copy means no thumbnail.
+                thumbs::obscured(&img).map(|b| to_slint(&b))
+            } else {
+                Some(to_slint(&img))
+            };
+            if let Some(thumb) = shown {
+                row.thumb = thumb;
+                row.has_thumb = true;
+            }
         }
         row
+    }
+
+    /// Rebuild every row's thumbnail for a changed Show NSFW state or catalog.
+    fn rebuild_rows(&self) {
+        let entries = self.entries.borrow();
+        for (i, e) in entries.iter().enumerate() {
+            if i < self.rows.row_count() {
+                self.rows.set_row_data(i, self.build_row(e));
+            }
+        }
     }
 
     /// Re-read the addons folder. `user` refreshes (screen shown, Refresh,
@@ -515,6 +546,7 @@ mod tests {
             version: Some("1.2".into()),
             thumbnail_url: Some("https://x.test/t.png".into()),
             vpks: Vec::new(),
+            nsfw: false,
         }
     }
 

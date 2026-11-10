@@ -663,6 +663,7 @@ struct InstallTask {
     name: String,
     version: Option<String>,
     thumbnail_url: Option<String>,
+    nsfw: bool,
 }
 
 enum Update {
@@ -732,6 +733,7 @@ fn run_install(
         name: task.name,
         version: task.version,
         thumbnail_url: task.thumbnail_url,
+        nsfw: task.nsfw,
     };
     install::install(&dest, meta, &paths).map_err(|e| msg(install_error_text(&e)))?;
     Ok(())
@@ -746,6 +748,22 @@ fn installed_ids() -> HashSet<String> {
         .into_iter()
         .filter_map(|m| m.sidecar.map(|s| s.mod_id))
         .collect()
+}
+
+/// Whether NSFW images are shown unblurred (the Browse switch; shared with
+/// Installed). False before Browse is attached.
+pub(crate) fn show_nsfw() -> bool {
+    let mut out = false;
+    with_browse(|b| out = b.list.show_nsfw.get());
+    out
+}
+
+/// Whether the loaded catalog marks `id` NSFW; `None` when no catalog has
+/// loaded (or Browse is not attached).
+pub(crate) fn catalog_nsfw(id: &str) -> Option<bool> {
+    let mut out = None;
+    with_browse(|b| out = b.nsfw_ids.borrow().as_ref().map(|ids| ids.contains(id)));
+    out
 }
 
 /// Re-read which mods are installed, so Install comes back after an
@@ -763,6 +781,8 @@ pub struct Browse {
     client: Arc<Client>,
     list: Rc<ModList>,
     catalog: RefCell<Rc<Vec<ModDto>>>,
+    /// Ids the loaded catalog marks NSFW; `None` until it has loaded.
+    nsfw_ids: RefCell<Option<HashSet<String>>>,
     categories: RefCell<Vec<String>>,
     query: RefCell<ModQuery>,
     load_generation: Cell<u64>,
@@ -834,6 +854,7 @@ pub fn attach(app: &App, api_url: &str) -> Arc<thumbs::Cache> {
         weak: weak.clone(),
         client: Arc::new(Client::new(api_url)),
         list: list.clone(),
+        nsfw_ids: RefCell::new(None),
         catalog: RefCell::new(Rc::new(Vec::new())),
         categories: RefCell::new(Vec::new()),
         query: RefCell::new(ModQuery {
@@ -892,6 +913,7 @@ pub fn attach(app: &App, api_url: &str) -> Arc<thumbs::Cache> {
             b.with_state(|s| s.set_show_nsfw(show));
             b.detail_images_changed();
         });
+        crate::installed::nsfw_changed();
     });
     state.on_open_detail(|id| with_browse(|b| b.open_detail(id.as_str())));
     state.on_close_detail(handle(|b| b.close_detail()));
@@ -1031,8 +1053,16 @@ impl Browse {
         let mut labels: Vec<SharedString> = vec![ALL_CATEGORIES.into()];
         labels.extend(cats.iter().map(|c| SharedString::from(c.as_str())));
         *self.categories.borrow_mut() = cats;
+        *self.nsfw_ids.borrow_mut() = Some(
+            mods.iter()
+                .filter(|m| m.is_nsfw)
+                .map(|m| m.id.clone())
+                .collect(),
+        );
         *self.catalog.borrow_mut() = Rc::new(mods);
         *self.list.installed.borrow_mut() = installed;
+        // Installed rows of mods installed before Shiv recorded the flag.
+        crate::installed::nsfw_changed();
         self.with_state(|s| {
             s.set_categories(ModelRc::new(VecModel::from(labels)));
             s.set_category_index(index as i32);
@@ -1237,6 +1267,7 @@ impl Browse {
             name: entry.name,
             version: entry.version,
             thumbnail_url: entry.thumb_url,
+            nsfw: entry.nsfw,
         };
         let client = self.client.clone();
         let weak = self.weak.clone();
