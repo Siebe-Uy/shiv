@@ -524,31 +524,65 @@ mod tests {
         assert_eq!(to_plain_text(raw), "safetxt.exe ab x y z");
     }
 
-    /// Many `[` and `&` with multi-byte text around them stay linear. The
-    /// first inputs were quadratic before (seconds); the last one is all
-    /// markup that is consumed silently, so every byte is processed, and
-    /// gets a looser bound for unoptimised test builds under load.
+    /// Best of five conversions (load spikes only ever add time).
+    fn best_time(raw: &str) -> std::time::Duration {
+        (0..5)
+            .map(|_| {
+                let start = std::time::Instant::now();
+                let text = to_plain_text(raw);
+                let took = start.elapsed();
+                assert!(text.chars().count() <= MAX_CHARS + 1);
+                took
+            })
+            .min()
+            .unwrap_or_default()
+    }
+
+    /// `slow < limit * base`, ignoring times too small to compare.
+    fn within(slow: std::time::Duration, base: std::time::Duration, limit: u32) -> bool {
+        let floor = std::time::Duration::from_millis(5);
+        slow <= floor || slow < base.max(floor / limit) * limit
+    }
+
+    /// Many `[` and `&` with multi-byte text around them stay linear. With
+    /// the old fixed windows, a window ending mid-character made every `&`
+    /// or `[` scan the rest of the text (up to 12,000 times over 2 MB:
+    /// seconds). Wall-clock bounds flaked under parallel load, so each input
+    /// is timed against its ASCII twin, which never hit that fallback: the
+    /// about the same time when linear (measured 1.0x in a debug build),
+    /// over 8x with the old windows; the check fails above 3x.
     #[test]
-    fn large_inputs_stay_fast() {
-        let ms = std::time::Duration::from_millis;
-        let inputs = [
+    fn multibyte_markup_costs_the_same_as_ascii() {
+        let pairs = [
             // Five-byte units, so the old fixed windows ended mid-character.
-            ("&\u{e9}\u{e9}".repeat(400_000), ms(200)),
-            ("[\u{e9}\u{e9}".repeat(400_000), ms(200)),
-            ("[url=\u{e9}".repeat(300_000), ms(200)),
-            (
-                format!("[url=https://x.test/{}]", "c".repeat(300)).repeat(6_000),
-                ms(200),
-            ),
-            ("&#0;[b][/b]<i></i>".repeat(110_000), ms(1000)),
+            ("&\u{e9}\u{e9}", "&eeee", 400_000),
+            ("[\u{e9}\u{e9}", "[eeee", 400_000),
+            ("[url=\u{e9}", "[url=ee", 300_000),
         ];
-        for (raw, limit) in &inputs {
-            assert!(raw.len() >= 1_900_000, "{}", raw.len());
-            let start = std::time::Instant::now();
-            let text = to_plain_text(raw);
-            let took = start.elapsed();
-            assert!(text.chars().count() <= MAX_CHARS + 1);
-            assert!(took < *limit, "{took:?} for {:?}...", &raw[..20]);
+        for (unit, ascii, n) in pairs {
+            let (raw, twin) = (unit.repeat(n), ascii.repeat(n));
+            assert!(raw.len() >= 1_900_000 && raw.len() == twin.len());
+            let (t, base) = (best_time(&raw), best_time(&twin));
+            assert!(within(t, base, 3), "{t:?} vs ASCII {base:?} for {unit:?}");
+        }
+    }
+
+    /// Inputs that are processed to the end (every byte is markup, nothing
+    /// reaches the output cap) scale linearly: 4x the input within 8x the
+    /// time (quadratic would be 16x).
+    #[test]
+    fn all_markup_inputs_scale_linearly() {
+        let url = format!("[url=https://x.test/{}]", "c".repeat(300));
+        let inputs: [(&str, usize); 2] = [(&url, 1_500), ("&#0;[b][/b]<i></i>", 27_500)];
+        for (unit, n) in inputs {
+            let (small, large) = (unit.repeat(n), unit.repeat(4 * n));
+            assert!(large.len() >= 1_900_000, "{}", large.len());
+            let (t1, t4) = (best_time(&small), best_time(&large));
+            assert!(
+                within(t4, t1, 8),
+                "{t1:?} at 1x vs {t4:?} at 4x for {:?}...",
+                &unit[..12]
+            );
         }
     }
 
