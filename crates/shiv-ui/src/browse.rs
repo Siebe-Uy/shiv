@@ -1943,7 +1943,7 @@ mod tests {
             files_updated_at: files.map(str::to_owned),
             ..ModDto::default()
         };
-        let now = iso_to_epoch("2026-11-10T00:00:00Z").unwrap();
+        let now = iso_to_epoch("2026-11-10T12:00:00Z").unwrap();
         let updated = |d| Entry::from_dto_at(d, now).updated.to_string();
         assert_eq!(
             updated(m(
