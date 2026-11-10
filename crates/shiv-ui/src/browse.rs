@@ -101,7 +101,7 @@ fn thumb_url(m: &ModDto) -> Option<String> {
     Some(raw.to_owned())
 }
 
-fn catalog_error_text(e: &ApiError) -> String {
+pub(crate) fn catalog_error_text(e: &ApiError) -> String {
     match e {
         ApiError::Http { status, .. } => {
             format!("The mod service answered with HTTP {status}. Try again in a moment.")

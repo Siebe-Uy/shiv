@@ -6,8 +6,9 @@ import { InstalledPage, InstalledState, InstalledRow } from "installed.slint";
 import { LaunchPanel, LaunchDialog, LaunchState, FindingRow } from "launch.slint";
 import { RepairPage, RepairDialog, RepairState, RepairRow, RepairTone } from "repair.slint";
 import { CrosshairPage, CrosshairState, CrosshairValues, CrosshairField } from "crosshair.slint";
+import { PerformancePage, PerfState, PerfTier, PerfRow, PerfControl, PerfEditor, PerfChange } from "performance.slint";
 
-export { BrowseState, ModRow, LoadState, InstallState, InstalledState, InstalledRow, LaunchState, FindingRow, RepairState, RepairRow, RepairTone, CrosshairState, CrosshairValues, CrosshairField }
+export { BrowseState, ModRow, LoadState, InstallState, InstalledState, InstalledRow, LaunchState, FindingRow, RepairState, RepairRow, RepairTone, CrosshairState, CrosshairValues, CrosshairField, PerfState, PerfTier, PerfRow, PerfControl, PerfEditor, PerfChange }
 
 component NavItem inherits Rectangle {
     in property <string> label;
@@ -61,27 +62,6 @@ component NavItem inherits Rectangle {
     }
 }
 
-component Placeholder inherits Rectangle {
-    in property <string> title;
-    background: Theme.bg;
-    VerticalLayout {
-        padding: Theme.s3;
-        spacing: Theme.s1;
-        alignment: start;
-        Text {
-            text: root.title;
-            color: Theme.text;
-            font-size: Theme.text-xl;
-            font-weight: 600;
-        }
-        Text {
-            text: "Coming in a later task.";
-            color: Theme.text-muted;
-            font-size: Theme.text-md;
-        }
-    }
-}
-
 export component App inherits Window {
     title: "Shiv";
     icon: @image-url("assets/shiv-icon-64.png");
@@ -103,6 +83,9 @@ export component App inherits Window {
         }
         if (root.screen == 2) {
             CrosshairState.shown();
+        }
+        if (root.screen == 3) {
+            PerfState.shown();
         }
         if (root.screen == 4) {
             RepairState.shown();
@@ -179,11 +162,10 @@ export component App inherits Window {
                 visible: root.screen == 4;
             }
 
-            for name[i] in root.screens: Placeholder {
+            PerformancePage {
                 width: parent.width;
                 height: parent.height;
-                visible: i == 3 && root.screen == i;
-                title: name;
+                visible: root.screen == 3;
             }
         }
     }

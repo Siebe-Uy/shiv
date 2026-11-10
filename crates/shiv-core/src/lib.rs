@@ -7,5 +7,6 @@ pub mod health;
 mod hero_settings;
 pub mod install;
 pub mod launch;
+pub mod perf;
 mod platform;
 pub mod sidecar;

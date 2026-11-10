@@ -1,0 +1,632 @@
+// Performance: stage a preset or single settings from the API's perf
+// catalog, review the pending changes, then write them to gameinfo.gi.
+
+import { ListView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Button, TextButton, SearchField, Dropdown, Slider, Switch } from "widgets.slint";
+import { LoadState, CenteredMessage } from "browse.slint";
+
+// One of the five preset buttons.
+export struct PerfTier {
+    label: string,
+    // The catalog preset behind it, e.g. "DMM Clean by ..."; "" when the catalog has none.
+    name: string,
+    blurb: string,
+    available: bool,
+}
+
+// One setting in the searchable list.
+export struct PerfRow {
+    name: string,
+    // Label or help text, one line.
+    detail: string,
+    // Value in gameinfo.gi; "" when the file does not set it.
+    current: string,
+    // Staged value ("off" when it will be commented out); "" when unchanged.
+    pending: string,
+    selected: bool,
+}
+
+// How the selected setting is edited.
+export enum PerfControl { toggle, slider, choice, text, locked }
+
+// The selected setting.
+export struct PerfEditor {
+    open: bool,
+    name: string,
+    // "Lighting · float", plus a status note such as "blocked by the game".
+    meta: string,
+    help: string,
+    // "Range 0 to 1000 · default 400"; "" when unknown.
+    limits: string,
+    // "In gameinfo.gi: 400" or "Not set in gameinfo.gi".
+    current: string,
+    control: PerfControl,
+    // The value the control shows (pending, else current, else default).
+    value: string,
+    checked: bool,
+    number: float,
+    minimum: float,
+    maximum: float,
+    step: float,
+    options: [string],
+    option-index: int,
+    has-pending: bool,
+    // Set in the file (so it can be commented out).
+    is-set: bool,
+    // Why the setting can't be edited, or why the last value was refused.
+    note: string,
+}
+
+// One pending change.
+export struct PerfChange {
+    name: string,
+    before: string,
+    after: string,
+}
+
+export global PerfState {
+    in property <LoadState> load-state: LoadState.loading;
+    in property <string> error-text;
+    // Line under the title: catalog revision and the file's state.
+    in property <string> status;
+    in property <[PerfTier]> tiers;
+    // Index of the staged preset; -1 for none.
+    in property <int> active-tier: -1;
+    in property <[PerfRow]> rows;
+    in property <string> list-note;
+    in property <PerfEditor> editor;
+    in property <[PerfChange]> changes;
+    in property <string> apply-label;
+    in property <bool> game-running;
+    // Writing gameinfo.gi on a worker thread.
+    in property <bool> busy;
+    // Outcome of the last apply; "" when none.
+    in property <string> result-title;
+    in property <string> result-detail;
+    in property <bool> result-error;
+
+    // The screen was shown.
+    callback shown();
+    callback retry();
+    callback search(string);
+    callback select(int);
+    callback pick-tier(int);
+    callback set-text(string);
+    callback set-number(float);
+    callback toggle();
+    callback pick-option(int);
+    callback comment-out();
+    callback revert();
+    callback remove-change(int);
+    callback discard();
+    callback apply();
+    callback dismiss-result();
+}
+
+component TierButton inherits Rectangle {
+    in property <PerfTier> tier;
+    in property <bool> active;
+    callback clicked;
+
+    accessible-role: button;
+    accessible-label: root.tier.label + " preset";
+    accessible-action-default => {
+        if (root.tier.available) {
+            root.clicked();
+        }
+    }
+
+    height: 52px;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: root.active ? Theme.accent : (ta.has-hover && root.tier.available ? Theme.border-strong : Theme.border);
+    background: root.active ? Theme.raised : (ta.has-hover && root.tier.available ? Theme.hover : transparent);
+    opacity: root.tier.available ? 1.0 : 0.4;
+
+    VerticalLayout {
+        padding-left: Theme.s2;
+        padding-right: Theme.s1;
+        alignment: center;
+        spacing: 2px;
+        Text {
+            text: root.tier.label;
+            color: root.active ? Theme.accent : Theme.text;
+            font-size: Theme.text-md;
+            font-weight: 600;
+            overflow: elide;
+        }
+        Text {
+            text: root.tier.available ? root.tier.name : "No preset in the catalog";
+            color: Theme.text-muted;
+            font-size: Theme.text-sm;
+            overflow: elide;
+        }
+    }
+
+    ta := TouchArea {
+        enabled: root.tier.available;
+        mouse-cursor: root.tier.available ? pointer : default;
+        clicked => { root.clicked(); }
+    }
+}
+
+component SettingRow inherits Rectangle {
+    in property <PerfRow> item;
+    callback clicked;
+
+    accessible-role: list-item;
+    accessible-label: root.item.name;
+    accessible-item-selected: root.item.selected;
+    accessible-action-default => { root.clicked(); }
+
+    height: 48px;
+    background: root.item.selected ? Theme.raised : (ta.has-hover ? Theme.hover : transparent);
+
+    Rectangle {
+        x: 0px;
+        width: 2px;
+        background: Theme.accent;
+        visible: root.item.selected;
+    }
+
+    HorizontalLayout {
+        padding-left: Theme.s2;
+        // Room for the list's scroll bar.
+        padding-right: Theme.s3;
+        spacing: Theme.s2;
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 2px;
+            Text {
+                text: root.item.name;
+                color: Theme.text;
+                font-size: Theme.text-md;
+                overflow: elide;
+            }
+            if root.item.detail != "": Text {
+                text: root.item.detail;
+                color: Theme.text-muted;
+                font-size: Theme.text-sm;
+                overflow: elide;
+            }
+        }
+        Text {
+            max-width: 160px;
+            text: root.item.pending != ""
+                ? (root.item.current != "" ? root.item.current : "unset") + "  →  " + root.item.pending
+                : root.item.current;
+            color: root.item.pending != "" ? Theme.accent : Theme.text-muted;
+            font-size: Theme.text-sm;
+            vertical-alignment: center;
+            horizontal-alignment: right;
+            overflow: elide;
+        }
+    }
+
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: Theme.border;
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// Free-text value entry; Enter or Set reports it.
+component ValueField inherits Rectangle {
+    in property <string> value;
+    in property <string> identity;
+    callback submitted(string);
+
+    // A new selection (or a value set elsewhere) replaces what was typed.
+    property <string> source: root.identity + "\n" + root.value;
+    changed source => { input.text = root.value; }
+
+    HorizontalLayout {
+        spacing: Theme.s1;
+        Rectangle {
+            horizontal-stretch: 1;
+            height: Theme.control-h;
+            border-radius: Theme.radius;
+            border-width: 1px;
+            border-color: input.has-focus ? Theme.accent : Theme.border;
+            background: Theme.bg;
+            input := TextInput {
+                x: Theme.s1;
+                width: parent.width - 2 * Theme.s1;
+                height: parent.height;
+                text: root.value;
+                single-line: true;
+                color: Theme.text;
+                font-size: Theme.text-md;
+                vertical-alignment: center;
+                selection-background-color: Theme.accent.with-alpha(0.35);
+                selection-foreground-color: Theme.text;
+                accessible-label: "Value";
+                accepted => { root.submitted(self.text); }
+            }
+        }
+        Button {
+            text: "Set";
+            clicked => { root.submitted(input.text); }
+        }
+    }
+}
+
+component EditorPanel inherits Rectangle {
+    in property <PerfEditor> e;
+
+    border-radius: Theme.radius-md;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: Theme.raised;
+
+    if !root.e.open: Text {
+        x: Theme.s2;
+        width: parent.width - 2 * Theme.s2;
+        height: parent.height;
+        text: "Select a setting to see what it does and change it.";
+        color: Theme.text-muted;
+        font-size: Theme.text-md;
+        vertical-alignment: center;
+        horizontal-alignment: center;
+        wrap: word-wrap;
+    }
+
+    if root.e.open: VerticalLayout {
+        padding: Theme.s2;
+        spacing: Theme.s1;
+        alignment: start;
+
+        Text {
+            text: root.e.name;
+            color: Theme.text;
+            font-size: Theme.text-lg;
+            font-weight: 600;
+            wrap: word-wrap;
+        }
+        Text {
+            text: root.e.meta;
+            color: Theme.text-muted;
+            font-size: Theme.text-sm;
+            wrap: word-wrap;
+        }
+        Text {
+            text: root.e.help;
+            visible: root.e.help != "";
+            color: Theme.text;
+            font-size: Theme.text-md;
+            wrap: word-wrap;
+        }
+        Text {
+            text: root.e.limits;
+            visible: root.e.limits != "";
+            color: Theme.text-muted;
+            font-size: Theme.text-sm;
+            wrap: word-wrap;
+        }
+        Text {
+            text: root.e.current;
+            color: Theme.text-muted;
+            font-size: Theme.text-sm;
+        }
+
+        Rectangle { height: Theme.s1; }
+
+        if root.e.control == PerfControl.toggle: HorizontalLayout {
+            spacing: Theme.s2;
+            Switch {
+                label: root.e.name;
+                checked: root.e.checked;
+                toggled => { PerfState.toggle(); }
+            }
+            Text {
+                text: root.e.checked ? "On" : "Off";
+                color: Theme.text;
+                font-size: Theme.text-md;
+                vertical-alignment: center;
+            }
+        }
+
+        if root.e.control == PerfControl.slider: Slider {
+            label: "Value";
+            value: root.e.number;
+            minimum: root.e.minimum;
+            maximum: root.e.maximum;
+            step: root.e.step;
+            value-text: root.e.value;
+            changed(v) => { PerfState.set-number(v); }
+        }
+
+        if root.e.control == PerfControl.choice: Dropdown {
+            label: root.e.name;
+            options: root.e.options;
+            current-index: root.e.option-index;
+            selected(i) => { PerfState.pick-option(i); }
+        }
+
+        if root.e.control != PerfControl.toggle && root.e.control != PerfControl.choice && root.e.control != PerfControl.locked: ValueField {
+            value: root.e.value;
+            identity: root.e.name;
+            submitted(t) => { PerfState.set-text(t); }
+        }
+
+        Text {
+            text: root.e.note;
+            visible: root.e.note != "";
+            color: Theme.danger;
+            font-size: Theme.text-sm;
+            wrap: word-wrap;
+        }
+
+        HorizontalLayout {
+            spacing: Theme.s1;
+            alignment: start;
+            TextButton {
+                text: "Revert";
+                disabled: !root.e.has-pending;
+                clicked => { PerfState.revert(); }
+            }
+            TextButton {
+                text: "Comment out";
+                disabled: !root.e.is-set || root.e.control == PerfControl.locked;
+                clicked => { PerfState.comment-out(); }
+            }
+        }
+    }
+}
+
+component ChangeRow inherits Rectangle {
+    in property <PerfChange> change;
+    callback remove;
+
+    height: 40px;
+
+    HorizontalLayout {
+        padding-left: Theme.s2;
+        padding-right: Theme.s1;
+        spacing: Theme.s1;
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 1px;
+            Text {
+                text: root.change.name;
+                color: Theme.text;
+                font-size: Theme.text-sm;
+                overflow: elide;
+            }
+            Text {
+                text: root.change.before + "  →  " + root.change.after;
+                color: Theme.text-muted;
+                font-size: Theme.text-sm;
+                overflow: elide;
+            }
+        }
+        TextButton {
+            y: (parent.height - self.height) / 2;
+            text: "Undo";
+            accessible-label: "Undo " + root.change.name;
+            clicked => { root.remove(); }
+        }
+    }
+
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: Theme.border;
+    }
+}
+
+export component PerformancePage inherits Rectangle {
+    background: Theme.bg;
+
+    VerticalLayout {
+        padding: Theme.s3;
+        padding-bottom: Theme.s2;
+        spacing: Theme.s2;
+
+        VerticalLayout {
+            spacing: 2px;
+            Text {
+                text: "Performance";
+                color: Theme.text;
+                font-size: Theme.text-xl;
+                font-weight: 600;
+            }
+            Text {
+                text: PerfState.status;
+                color: Theme.text-muted;
+                font-size: Theme.text-md;
+                overflow: elide;
+            }
+        }
+
+        if PerfState.load-state == LoadState.loading: CenteredMessage {
+            vertical-stretch: 1;
+            title: "Loading the performance catalog";
+            detail: "Presets and setting details come from the Deadlock Mod Manager API.";
+        }
+
+        if PerfState.load-state == LoadState.failed: VerticalLayout {
+            vertical-stretch: 1;
+            alignment: center;
+            spacing: Theme.s2;
+            CenteredMessage {
+                title: "Couldn't load the performance catalog";
+                detail: PerfState.error-text;
+            }
+            HorizontalLayout {
+                alignment: center;
+                Button {
+                    text: "Retry";
+                    primary: true;
+                    clicked => { PerfState.retry(); }
+                }
+            }
+        }
+
+        if PerfState.load-state == LoadState.ready: HorizontalLayout {
+            spacing: Theme.s1;
+            for tier[i] in PerfState.tiers: TierButton {
+                horizontal-stretch: 1;
+                tier: tier;
+                active: PerfState.active-tier == i;
+                clicked => { PerfState.pick-tier(i); }
+            }
+        }
+
+        if PerfState.load-state == LoadState.ready: HorizontalLayout {
+            vertical-stretch: 1;
+            spacing: Theme.s3;
+
+            // Searchable list of every setting.
+            VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: Theme.s1;
+                SearchField {
+                    placeholder: "Search settings";
+                    edited(t) => { PerfState.search(t); }
+                }
+                Text {
+                    text: PerfState.list-note;
+                    color: Theme.text-muted;
+                    font-size: Theme.text-sm;
+                }
+                Rectangle {
+                    vertical-stretch: 1;
+                    border-radius: Theme.radius;
+                    border-width: 1px;
+                    border-color: Theme.border;
+                    clip: true;
+                    ListView {
+                        x: 1px;
+                        y: 1px;
+                        width: parent.width - 2px;
+                        height: parent.height - 2px;
+                        for row[i] in PerfState.rows: SettingRow {
+                            item: row;
+                            clicked => { PerfState.select(i); }
+                        }
+                    }
+                }
+            }
+
+            // The selected setting, the pending changes and Apply.
+            VerticalLayout {
+                horizontal-stretch: 0;
+                width: 340px;
+                spacing: Theme.s2;
+
+                EditorPanel {
+                    vertical-stretch: 3;
+                    min-height: 220px;
+                    e: PerfState.editor;
+                }
+
+                VerticalLayout {
+                    vertical-stretch: 2;
+                    spacing: Theme.s1;
+                    HorizontalLayout {
+                        Text {
+                            horizontal-stretch: 1;
+                            text: PerfState.changes.length == 0 ? "No pending changes" : "Pending changes (" + PerfState.changes.length + ")";
+                            color: Theme.text;
+                            font-size: Theme.text-md;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+                        TextButton {
+                            text: "Discard all";
+                            disabled: PerfState.changes.length == 0 || PerfState.busy;
+                            clicked => { PerfState.discard(); }
+                        }
+                    }
+                    Rectangle {
+                        vertical-stretch: 1;
+                        min-height: 80px;
+                        border-radius: Theme.radius;
+                        border-width: 1px;
+                        border-color: Theme.border;
+                        clip: true;
+                        if PerfState.changes.length == 0: Text {
+                            x: Theme.s2;
+                            width: parent.width - 2 * Theme.s2;
+                            height: parent.height;
+                            text: "Pick a preset or change a setting. Nothing is written until you apply.";
+                            color: Theme.text-muted;
+                            font-size: Theme.text-sm;
+                            vertical-alignment: center;
+                            horizontal-alignment: center;
+                            wrap: word-wrap;
+                        }
+                        ListView {
+                            x: 1px;
+                            y: 1px;
+                            width: parent.width - 2px;
+                            height: parent.height - 2px;
+                            for change[i] in PerfState.changes: ChangeRow {
+                                change: change;
+                                remove => { PerfState.remove-change(i); }
+                            }
+                        }
+                    }
+                }
+
+                if PerfState.game-running: Text {
+                    text: "Deadlock is running. You can keep editing; close the game to apply.";
+                    color: Theme.accent;
+                    font-size: Theme.text-sm;
+                    wrap: word-wrap;
+                }
+
+                if PerfState.result-title != "": Rectangle {
+                    border-radius: Theme.radius;
+                    border-width: 1px;
+                    border-color: PerfState.result-error ? Theme.danger : Theme.border;
+                    background: Theme.raised;
+                    HorizontalLayout {
+                        padding: Theme.s1;
+                        padding-left: Theme.s2;
+                        spacing: Theme.s1;
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            spacing: 2px;
+                            alignment: center;
+                            Text {
+                                text: PerfState.result-title;
+                                color: PerfState.result-error ? Theme.danger : Theme.text;
+                                font-size: Theme.text-md;
+                                font-weight: 600;
+                                wrap: word-wrap;
+                            }
+                            Text {
+                                text: PerfState.result-detail;
+                                visible: PerfState.result-detail != "";
+                                color: Theme.text-muted;
+                                font-size: Theme.text-sm;
+                                wrap: word-wrap;
+                            }
+                        }
+                        TextButton {
+                            text: "Dismiss";
+                            clicked => { PerfState.dismiss-result(); }
+                        }
+                    }
+                }
+
+                Button {
+                    text: PerfState.busy ? "Applying" : PerfState.apply-label;
+                    primary: true;
+                    disabled: PerfState.changes.length == 0 || PerfState.busy;
+                    clicked => { PerfState.apply(); }
+                }
+            }
+        }
+    }
+}

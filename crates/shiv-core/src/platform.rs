@@ -99,3 +99,30 @@ pub fn opener_exit_status_is_meaningful() -> bool {
 pub fn opener_exit_status_is_meaningful() -> bool {
     true
 }
+
+/// The user's cache folder (`$XDG_CACHE_HOME`, else `~/.cache`).
+#[cfg(target_os = "linux")]
+pub fn cache_dir() -> Option<PathBuf> {
+    std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+}
+
+/// The user's cache folder (`%LOCALAPPDATA%`).
+#[cfg(windows)]
+pub fn cache_dir() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
+}
+
+/// The user's cache folder (`~/Library/Caches`).
+#[cfg(target_os = "macos")]
+pub fn cache_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library").join("Caches"))
+}
+
+/// No known cache folder on other platforms.
+#[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
+pub fn cache_dir() -> Option<PathBuf> {
+    None
+}

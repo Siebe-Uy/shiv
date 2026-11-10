@@ -4402,6 +4402,7 @@ version = "0.1.0"
 dependencies = [
  "crc32fast",
  "kv-parser",
+ "regex",
  "serde",
  "serde_json",
  "sevenz-rust2",

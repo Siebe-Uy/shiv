@@ -8,6 +8,7 @@ mod browse;
 mod crosshair;
 mod installed;
 mod launch;
+mod performance;
 mod repair;
 mod thumbs;
 
@@ -34,6 +35,7 @@ fn main() -> Result<(), slint::PlatformError> {
     launch::attach(&app);
     repair::attach(&app);
     crosshair::attach(&app);
+    performance::attach(&app, &api_url);
     // Debug builds only: open on another screen (e.g. for screenshots); 0 is Browse.
     #[cfg(debug_assertions)]
     if let Some(n) = std::env::var("SHIV_SCREEN")
@@ -44,6 +46,7 @@ fn main() -> Result<(), slint::PlatformError> {
         // Setting the screen from Rust does not run `changed screen`.
         match app.get_screen() {
             2 => app.global::<CrosshairState>().invoke_shown(),
+            3 => app.global::<PerfState>().invoke_shown(),
             4 => app.global::<RepairState>().invoke_shown(),
             _ => {}
         }
@@ -137,6 +140,7 @@ mod tests {
         launch_flow();
         repair_flow();
         crosshair_flow();
+        performance_flow();
     }
 
     /// A tiny install for the repair engine (as in shiv-repair's own tests):
@@ -402,6 +406,190 @@ mod tests {
     /// keeps the user's other settings and drops the old autoexec block;
     /// edits are dropped while an apply writes; unapplied edits survive a
     /// re-show; a missing Steam shows a clear error.
+    /// A small perf catalog: no lean preset, one denied convar.
+    pub(crate) const PERF_CATALOG: &str = r#"{"schemaVersion":1,"version":"2026.11.07-1","generatedAt":"x",
+      "categories":[{"id":"lighting","label":"Lighting","weight":2}],
+      "convars":[
+        {"name":"fps_max","kind":"int","min":0,"max":1000,"default":"400","help":"Frame rate cap","category":"other"},
+        {"name":"r_ssao","kind":"bool","help":"Ambient occlusion","category":"lighting"},
+        {"name":"sv_cheats","kind":"bool","category":"other"},
+        {"name":"r_mode","kind":"enum","enumValues":[{"value":"0","label":"Low"},{"value":"1","label":"High"}],"category":"other"}
+      ],
+      "presets":[
+        {"id":"b","name":"Bal","author":"me","tier":"balanced","blurb":"Even.","source":{"kind":"bundled"},
+         "entries":[{"path":["ConVars","r_ssao"],"value":"false"},{"path":["ConVars","fps_max"],"value":"240"},{"path":["ConVars","sv_cheats"],"value":"1"}]},
+        {"id":"p","name":"Pretty","author":"me","tier":"pretty","blurb":"Nice.","source":{"kind":"bundled"},"entries":[{"path":["ConVars","r_ssao"],"value":"true"},{"path":["ConVars","r_mode"],"value":"1"}]},
+        {"id":"s","name":"Sweat","author":"me","tier":"sweaty","blurb":"Fast.","source":{"kind":"bundled"},"entries":[{"path":["ConVars","r_ssao"],"value":"false"}]},
+        {"id":"t","name":"Potato","author":"me","tier":"potato","blurb":"Fastest.","source":{"kind":"bundled"},"entries":[{"path":["ConVars","r_ssao"],"value":"0"}]}
+      ],
+      "rules":{"excludedSections":["FileSystem"],"guardedSections":[],"denied":[{"path":["ConVars","sv_cheats"],"reason":"Turns on cheats."}]}}"#;
+
+    /// Performance against a temp gameinfo.gi and a stub catalog: presets
+    /// stage changes, the editor follows kind, range and the deny rules,
+    /// Apply is refused while the game runs and then writes with a backup.
+    fn performance_flow() {
+        use shiv_core::perf::CatalogCache;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let paths = shiv_core::game::GamePaths::from_root(temp.path().join("Deadlock"));
+        std::fs::create_dir_all(&paths.addons).expect("addons");
+        let original = "GameInfo\n{\n\tFileSystem\n\t{\n\t\tSearchPaths\n\t\t{\n\t\t\tGame citadel\n\t\t}\n\t}\n\tConVars\n\t{\n\t\t\"r_ssao\"\t\t\"true\" // keep me\n\t\tfps_max 400\n\t}\n}\n";
+        std::fs::write(&paths.gameinfo, original).expect("gameinfo");
+
+        let running = Arc::new(AtomicBool::new(false));
+        let fetches = Arc::new(AtomicUsize::new(0));
+        let (flag, count, located) = (running.clone(), fetches.clone(), paths.clone());
+        let app = App::new().expect("app");
+        performance::attach_with(
+            &app,
+            performance::Deps {
+                locate: Arc::new(move || Ok(located.clone())),
+                running: Arc::new(move || flag.load(Ordering::Relaxed)),
+                fetch: Arc::new(move |_| {
+                    count.fetch_add(1, Ordering::Relaxed);
+                    Ok(Some(("\"e1\"".into(), PERF_CATALOG.as_bytes().to_vec())))
+                }),
+                cache: Some(CatalogCache::new(temp.path().join("cache"))),
+            },
+        );
+        app.show().expect("show");
+        let state = app.global::<PerfState>();
+        let ready = |a: &App| {
+            let s = a.global::<PerfState>();
+            s.get_load_state() == LoadState::Ready && s.get_status().contains("settings set")
+        };
+        app.set_screen(3);
+        assert!(run_until(&app, Duration::from_secs(20), ready));
+        assert_eq!(
+            state.get_status().as_str(),
+            "Catalog 2026.11.07-1 · 2 settings set in gameinfo.gi"
+        );
+        let tiers: Vec<_> = state.get_tiers().iter().collect();
+        assert_eq!(tiers.len(), 5);
+        assert!(!tiers[2].available, "the catalog has no lean preset");
+        assert!(tiers[1].available && tiers[1].name.contains("Bal"));
+        // Settings the file sets come first.
+        let rows: Vec<_> = state.get_rows().iter().collect();
+        assert_eq!(rows[0].name.as_str(), "fps_max");
+        assert_eq!(rows[0].current.as_str(), "400");
+        assert_eq!(rows[1].name.as_str(), "r_ssao");
+        assert_eq!(state.get_rows().row_count(), 4);
+
+        // A preset stages its allowed ConVars edits; nothing is written yet.
+        click(&app, "Balanced preset");
+        assert_eq!(state.get_active_tier(), 1);
+        let changes: Vec<_> = state.get_changes().iter().collect();
+        assert_eq!(changes.len(), 2, "sv_cheats is denied");
+        assert_eq!(changes[0].name.as_str(), "fps_max");
+        assert_eq!(changes[0].before.as_str(), "400");
+        assert_eq!(changes[0].after.as_str(), "240");
+        assert_eq!(state.get_apply_label().as_str(), "Apply 2 changes");
+        assert_eq!(
+            std::fs::read_to_string(&paths.gameinfo).expect("read"),
+            original
+        );
+
+        // The editor follows the convar's kind and range.
+        state.invoke_search("fps".into());
+        assert_eq!(state.get_rows().row_count(), 1);
+        click(&app, "fps_max");
+        let e = state.get_editor();
+        assert!(e.open);
+        assert_eq!(e.control, PerfControl::Slider);
+        assert_eq!(e.value.as_str(), "240");
+        assert_eq!(e.maximum, 1000.0);
+        assert!(e.limits.contains("Range 0 to 1000"), "{}", e.limits);
+        assert_eq!(e.help.as_str(), "Frame rate cap");
+        state.invoke_set_text("5000".into());
+        assert_eq!(state.get_editor().value.as_str(), "1000", "clamped");
+        state.invoke_set_text("fast".into());
+        assert!(state.get_editor().note.contains("whole number"));
+        assert_eq!(
+            state.get_rows().row_data(0).expect("row").pending.as_str(),
+            "1000"
+        );
+        // Back to the file's value: no longer a change.
+        state.invoke_set_number(400.0);
+        assert_eq!(state.get_changes().row_count(), 1);
+        state.invoke_set_number(300.0);
+
+        // A denied convar can't be edited.
+        state.invoke_search("cheats".into());
+        click(&app, "sv_cheats");
+        assert_eq!(state.get_editor().control, PerfControl::Locked);
+        assert!(state.get_editor().note.contains("cheats"));
+        state.invoke_toggle();
+        assert_eq!(state.get_changes().row_count(), 2);
+
+        // Enum: a choice; picking the file's value changes nothing.
+        state.invoke_search("r_mode".into());
+        click(&app, "r_mode");
+        assert_eq!(state.get_editor().control, PerfControl::Choice);
+        state.invoke_pick_option(1);
+        assert_eq!(state.get_changes().row_count(), 3);
+        click(&app, "Undo r_mode");
+        assert_eq!(state.get_changes().row_count(), 2);
+
+        // Comment out: r_ssao goes off.
+        state.invoke_search("".into());
+        click(&app, "r_ssao");
+        assert_eq!(state.get_editor().control, PerfControl::Toggle);
+        click(&app, "Comment out");
+        let changes: Vec<_> = state.get_changes().iter().collect();
+        assert_eq!(changes[1].after.as_str(), "commented out");
+
+        // Game running: Apply is refused and nothing is written.
+        let idle = |a: &App| !a.global::<PerfState>().get_busy();
+        running.store(true, Ordering::Relaxed);
+        state.invoke_apply();
+        assert!(run_until(&app, Duration::from_secs(20), idle));
+        assert!(state.get_result_error());
+        assert!(state.get_result_detail().contains("Deadlock is running"));
+        assert!(state.get_game_running());
+        assert_eq!(
+            std::fs::read_to_string(&paths.gameinfo).expect("read"),
+            original
+        );
+        assert_eq!(state.get_changes().row_count(), 2, "edits survive");
+        running.store(false, Ordering::Relaxed);
+
+        // Apply writes only the listed keys and keeps a backup.
+        state.invoke_apply();
+        assert!(run_until(&app, Duration::from_secs(20), idle));
+        assert!(!state.get_result_error(), "{}", state.get_result_detail());
+        assert_eq!(state.get_result_title().as_str(), "Settings applied");
+        let written = std::fs::read_to_string(&paths.gameinfo).expect("read");
+        assert_eq!(
+            written,
+            original
+                .replace("fps_max 400", "fps_max 300")
+                .replace("\t\t\"r_ssao\"", "\t\t// shiv off: \"r_ssao\"")
+        );
+        let backup = paths.gameinfo.with_file_name("gameinfo.gi.bak");
+        assert_eq!(std::fs::read_to_string(backup).expect("backup"), original);
+        assert_eq!(state.get_changes().row_count(), 0);
+        assert_eq!(state.get_active_tier(), -1);
+        assert_eq!(state.get_apply_label().as_str(), "Apply");
+        assert!(
+            state.get_status().contains("1 settings set"),
+            "{}",
+            state.get_status()
+        );
+
+        // Showing again re-reads the file (the catalog is not fetched again).
+        std::fs::write(&paths.gameinfo, original).expect("game update");
+        state.invoke_shown();
+        let reread = |a: &App| {
+            a.global::<PerfState>()
+                .get_status()
+                .contains("2 settings set")
+        };
+        assert!(run_until(&app, Duration::from_secs(20), reread));
+        assert_eq!(fetches.load(Ordering::Relaxed), 1);
+    }
+
     fn crosshair_flow() {
         use shiv_core::crosshair::{self as core, CrosshairConfig};
         use std::sync::Arc;
