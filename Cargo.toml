@@ -6,5 +6,7 @@ members = ["crates/*"]
 lto = true
 opt-level = 3
 codegen-units = 1
-panic = "abort"
+# Unwind so a panicking worker thread reports an error (shiv-ui `spawn_worker`)
+# instead of killing the app.
+panic = "unwind"
 strip = true

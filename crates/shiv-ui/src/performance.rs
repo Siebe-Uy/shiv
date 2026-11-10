@@ -13,7 +13,6 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::thread;
 
 use shiv_api::Client;
 use shiv_core::perf::{
@@ -294,13 +293,6 @@ fn write(deps: &Deps, entries: &[ConfigEntry]) -> Result<Written, (String, bool)
     Ok((current, perf::original_backup_path(&paths)))
 }
 
-fn spawn(name: &str, f: impl FnOnce() + Send + 'static) -> bool {
-    thread::Builder::new()
-        .name(name.to_owned())
-        .spawn(f)
-        .is_ok()
-}
-
 // ---------------------------------------------------------------------------
 // Controller
 
@@ -488,13 +480,17 @@ impl Perf {
         self.with_state(|s| s.set_load_state(LoadState::Loading));
         let deps = self.deps.clone();
         let weak = self.weak.clone();
-        let started = spawn("shiv-perf-load", move || {
-            let catalog = load_catalog(&deps);
-            let file = load_file(&deps);
-            let _ = weak.upgrade_in_event_loop(move |_| {
-                with_perf(|p| p.loaded(catalog, file));
-            });
-        });
+        let started = crate::spawn_worker(
+            "shiv-perf-load",
+            move || (load_catalog(&deps), load_file(&deps)),
+            move |result| {
+                let (catalog, file) =
+                    result.unwrap_or_else(|text| (Err(text), (Err(String::new()), false)));
+                let _ = weak.upgrade_in_event_loop(move |_| {
+                    with_perf(|p| p.loaded(catalog, file));
+                });
+            },
+        );
         if !started {
             self.loaded(
                 Err("Could not start a background thread.".into()),
@@ -534,16 +530,20 @@ impl Perf {
         self.loading.set(true);
         let deps = self.deps.clone();
         let weak = self.weak.clone();
-        let started = spawn("shiv-perf-read", move || {
-            let file = load_file(&deps);
-            let _ = weak.upgrade_in_event_loop(move |_| {
-                with_perf(|p| {
-                    p.loading.set(false);
-                    p.file_loaded(file);
-                    p.resume();
+        let started = crate::spawn_worker(
+            "shiv-perf-read",
+            move || load_file(&deps),
+            move |result| {
+                let file = result.unwrap_or_else(|text| (Err(text), false));
+                let _ = weak.upgrade_in_event_loop(move |_| {
+                    with_perf(|p| {
+                        p.loading.set(false);
+                        p.file_loaded(file);
+                        p.resume();
+                    });
                 });
-            });
-        });
+            },
+        );
         if !started {
             self.loading.set(false);
         }
@@ -1078,12 +1078,16 @@ impl Perf {
         let deps = self.deps.clone();
         let weak = self.weak.clone();
         let count = entries.len();
-        let started = spawn("shiv-perf-apply", move || {
-            let result = write(&deps, &entries);
-            let _ = weak.upgrade_in_event_loop(move |_| {
-                with_perf(|p| p.applied(count, result));
-            });
-        });
+        let started = crate::spawn_worker(
+            "shiv-perf-apply",
+            move || write(&deps, &entries),
+            move |result| {
+                let result = result.unwrap_or_else(|text| Err((text, false)));
+                let _ = weak.upgrade_in_event_loop(move |_| {
+                    with_perf(|p| p.applied(count, result));
+                });
+            },
+        );
         if !started {
             self.applied(
                 count,

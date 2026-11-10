@@ -13,7 +13,6 @@ use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::thread;
 
 use shiv_core::crosshair::{self, CrosshairConfig, CrosshairError, Rgb};
 use slint::{Color, ComponentHandle, ModelRc, VecModel, Weak};
@@ -196,13 +195,6 @@ fn write(deps: &Deps, c: &CrosshairConfig) -> Result<(), (String, bool)> {
     crosshair::apply(&paths, &user_dir, c).map_err(|e| (error_text(&e), false))
 }
 
-fn spawn(name: &str, f: impl FnOnce() + Send + 'static) -> bool {
-    thread::Builder::new()
-        .name(name.to_owned())
-        .spawn(f)
-        .is_ok()
-}
-
 // ---------------------------------------------------------------------------
 // Controller
 
@@ -317,12 +309,16 @@ impl Crosshair {
         let edits = self.edits.get();
         let deps = self.deps.clone();
         let weak = self.weak.clone();
-        let started = spawn("shiv-crosshair-load", move || {
-            let result = load(&deps);
-            let _ = weak.upgrade_in_event_loop(move |_| {
-                with_crosshair(|c| c.loaded(edits, result));
-            });
-        });
+        let started = crate::spawn_worker(
+            "shiv-crosshair-load",
+            move || load(&deps),
+            move |result| {
+                let result = result.and_then(|r| r);
+                let _ = weak.upgrade_in_event_loop(move |_| {
+                    with_crosshair(|c| c.loaded(edits, result));
+                });
+            },
+        );
         if !started {
             self.loaded(edits, Err("Could not start a background thread.".into()));
         }
@@ -369,12 +365,16 @@ impl Crosshair {
         self.show_result("", "", false);
         let deps = self.deps.clone();
         let weak = self.weak.clone();
-        let started = spawn("shiv-crosshair-apply", move || {
-            let result = write(&deps, &c);
-            let _ = weak.upgrade_in_event_loop(move |_| {
-                with_crosshair(|x| x.applied(c, result));
-            });
-        });
+        let started = crate::spawn_worker(
+            "shiv-crosshair-apply",
+            move || write(&deps, &c),
+            move |result| {
+                let result = result.unwrap_or_else(|text| Err((text, false)));
+                let _ = weak.upgrade_in_event_loop(move |_| {
+                    with_crosshair(|x| x.applied(c, result));
+                });
+            },
+        );
         if !started {
             self.applied(
                 c,

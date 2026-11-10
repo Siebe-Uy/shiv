@@ -51,6 +51,39 @@ pub(crate) fn release_freed_memory() {
     }
 }
 
+/// Run `work` on a named worker thread and pass its result to `done`, also on
+/// that thread (it posts back to the event loop). A panic in `work` reaches
+/// `done` as `Err` with a readable message, so every caller clears its busy
+/// flag or in-flight marker and shows an error instead of hanging (release
+/// builds unwind). Returns false when the thread could not be started; `done`
+/// is then not called.
+pub(crate) fn spawn_worker<T: Send + 'static>(
+    name: &str,
+    work: impl FnOnce() -> T + Send + 'static,
+    done: impl FnOnce(Result<T, String>) + Send + 'static,
+) -> bool {
+    std::thread::Builder::new()
+        .name(name.to_owned())
+        .spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
+                .map_err(|payload| panic_text(payload.as_ref()));
+            done(result);
+        })
+        .is_ok()
+}
+
+/// The message for a worker that panicked.
+pub(crate) fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    let detail = payload
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown cause".to_owned());
+    format!(
+        "Shiv hit an internal error and stopped this task ({detail}). Try again; if it keeps happening, please report it."
+    )
+}
+
 fn main() -> Result<(), slint::PlatformError> {
     tune_allocator();
     let app = App::new()?;
@@ -121,6 +154,31 @@ mod tests {
                 return false;
             }
         }
+    }
+
+    #[test]
+    fn a_panicking_worker_still_reports_back() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let sent = tx.clone();
+        assert!(spawn_worker(
+            "shiv-test-ok",
+            || 7,
+            move |r| sent.send(r).expect("send")
+        ));
+        assert_eq!(rx.recv_timeout(Duration::from_secs(10)), Ok(Ok(7)));
+        assert!(spawn_worker(
+            "shiv-test-panic",
+            || -> i32 { panic!("boom {}", 1) },
+            move |r| tx.send(r).expect("send")
+        ));
+        let text = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("reported")
+            .expect_err("panicked");
+        assert!(
+            text.contains("internal error") && text.contains("boom 1"),
+            "{text}"
+        );
     }
 
     fn click(app: &App, label: &str) {
@@ -1030,6 +1088,9 @@ mod tests {
         // While set, `locate` (and so every refresh) blocks on its worker thread.
         let gate = Arc::new(AtomicBool::new(false));
         let gate_in = gate.clone();
+        // When set, the next game-running check panics on its worker.
+        let boom = Arc::new(AtomicBool::new(false));
+        let boom_in = boom.clone();
         let deps = installed::Deps {
             locate: Arc::new(move || {
                 while gate_in.load(Ordering::Relaxed) {
@@ -1037,7 +1098,10 @@ mod tests {
                 }
                 Ok(located.clone())
             }),
-            running: Arc::new(move || flag.load(Ordering::Relaxed)),
+            running: Arc::new(move || {
+                assert!(!boom_in.swap(false, Ordering::Relaxed), "test worker panic");
+                flag.load(Ordering::Relaxed)
+            }),
         };
         let app = App::new().expect("app");
         let cache = Arc::new(thumbs::Cache::with_fetcher(1 << 20, |_| None));
@@ -1115,6 +1179,25 @@ mod tests {
             !s.get_busy() && s.get_rows().row_data(0).is_some_and(|r| r.enabled)
         }));
         assert!(exists("pak01_dir.vpk"));
+
+        // A worker that panics mid-action: busy clears, an error shows, and
+        // nothing was changed.
+        boom.store(true, Ordering::Relaxed);
+        state.invoke_toggle("m1".into());
+        assert!(state.get_busy());
+        assert!(run_until(&app, Duration::from_secs(20), |a| {
+            let s = a.global::<InstalledState>();
+            !s.get_busy() && s.get_banner_text() != ""
+        }));
+        assert!(
+            state.get_banner_text().contains("internal error")
+                && state.get_banner_text().contains("test worker panic"),
+            "{}",
+            state.get_banner_text()
+        );
+        assert!(exists("pak01_dir.vpk"));
+        assert_eq!(enabled(&app, 0), Some(true));
+        click(&app, "Dismiss");
 
         // Game running: refresh picks it up; actions are refused with an explanation.
         running.store(true, Ordering::Relaxed);

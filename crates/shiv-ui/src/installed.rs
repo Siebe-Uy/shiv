@@ -11,7 +11,6 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::thread;
 
 use shiv_core::addons::{self, AddonsError};
 use shiv_core::game::{self, GameError, GamePaths};
@@ -217,13 +216,6 @@ fn run_action(deps: &Deps, m: &InstalledMod, name: &str, action: Action) -> Resu
     }
 }
 
-fn spawn(name: &str, f: impl FnOnce() + Send + 'static) -> bool {
-    thread::Builder::new()
-        .name(name.to_owned())
-        .spawn(f)
-        .is_ok()
-}
-
 // ---------------------------------------------------------------------------
 // Controller
 
@@ -312,12 +304,16 @@ impl Installed {
         });
         let deps = self.deps.clone();
         let weak = self.weak.clone();
-        let started = spawn("shiv-installed", move || {
-            let result = load(&deps);
-            let _ = weak.upgrade_in_event_loop(move |_| {
-                with_installed(|i| i.loaded(generation, result));
-            });
-        });
+        let started = crate::spawn_worker(
+            "shiv-installed",
+            move || load(&deps),
+            move |result| {
+                let result = result.and_then(|r| r);
+                let _ = weak.upgrade_in_event_loop(move |_| {
+                    with_installed(|i| i.loaded(generation, result));
+                });
+            },
+        );
         if !started {
             self.fail("Could not start a background thread.".into());
         }
@@ -371,19 +367,24 @@ impl Installed {
         }
         let cache = self.cache.clone();
         let weak = self.weak.clone();
-        spawn("shiv-installed-thumbs", move || {
-            for url in urls {
-                if cache.get_or_fetch(&url).is_none() {
-                    continue;
+        crate::spawn_worker(
+            "shiv-installed-thumbs",
+            move || {
+                for url in urls {
+                    if cache.get_or_fetch(&url).is_none() {
+                        continue;
+                    }
+                    let posted = weak.upgrade_in_event_loop(move |_| {
+                        with_installed(|i| i.thumb_ready(&url));
+                    });
+                    if posted.is_err() {
+                        return;
+                    }
                 }
-                let posted = weak.upgrade_in_event_loop(move |_| {
-                    with_installed(|i| i.thumb_ready(&url));
-                });
-                if posted.is_err() {
-                    return;
-                }
-            }
-        });
+            },
+            // Rows keep their placeholder; nothing waits on this worker.
+            |_| {},
+        );
     }
 
     fn thumb_ready(&self, url: &str) {
@@ -429,12 +430,16 @@ impl Installed {
         });
         let deps = self.deps.clone();
         let weak = self.weak.clone();
-        let started = spawn("shiv-installed-action", move || {
-            let result = run_action(&deps, &m, &name, action);
-            let _ = weak.upgrade_in_event_loop(move |_| {
-                with_installed(|i| i.acted(result));
-            });
-        });
+        let started = crate::spawn_worker(
+            "shiv-installed-action",
+            move || run_action(&deps, &m, &name, action),
+            move |result| {
+                let result = result.and_then(|r| r);
+                let _ = weak.upgrade_in_event_loop(move |_| {
+                    with_installed(|i| i.acted(result));
+                });
+            },
+        );
         if !started {
             self.acted(Err("Could not start a background thread.".into()));
         }

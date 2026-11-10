@@ -9,7 +9,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::{Rc, Weak as RcWeak};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
-use std::thread;
 use std::time::Duration;
 
 use shiv_api::{ApiError, Client, ModDto, ModQuery, SortKey, apply_query};
@@ -52,14 +51,6 @@ fn with_browse(f: impl FnOnce(&Rc<Browse>)) {
     if let Some(b) = BROWSE.with(|cell| cell.borrow().clone()) {
         f(&b);
     }
-}
-
-/// Spawn a named worker; `false` if the OS refused a thread.
-fn spawn(name: &str, f: impl FnOnce() + Send + 'static) -> bool {
-    thread::Builder::new()
-        .name(name.to_owned())
-        .spawn(f)
-        .is_ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -173,9 +164,17 @@ impl ThumbLoader {
             let shared = loader.shared.clone();
             let cache = cache.clone();
             let weak = weak.clone();
-            spawn(&format!("shiv-thumb-{n}"), move || {
-                thumb_worker(&shared, &cache, &weak);
-            });
+            crate::spawn_worker(
+                &format!("shiv-thumb-{n}"),
+                move || thumb_worker(&shared, &cache, &weak),
+                // Fetch and decode panics are caught per image in the cache;
+                // anything else only costs this one worker.
+                |result| {
+                    if let Err(text) = result {
+                        eprintln!("thumbnail worker stopped: {text}");
+                    }
+                },
+            );
         }
         loader
     }
@@ -574,13 +573,19 @@ impl Browse {
         });
         let client = self.client.clone();
         let weak = self.weak.clone();
-        let started = spawn("shiv-catalog", move || {
-            let result = client.list_mods();
-            let installed = installed_ids();
-            let _ = weak.upgrade_in_event_loop(move |_| {
-                with_browse(|b| b.loaded(generation, result, installed));
-            });
-        });
+        let started = crate::spawn_worker(
+            "shiv-catalog",
+            move || {
+                let result = client.list_mods().map_err(|e| catalog_error_text(&e));
+                (result, installed_ids())
+            },
+            move |result| {
+                let (result, installed) = result.unwrap_or_else(|text| (Err(text), HashSet::new()));
+                let _ = weak.upgrade_in_event_loop(move |_| {
+                    with_browse(|b| b.loaded(generation, result, installed));
+                });
+            },
+        );
         if !started {
             self.fail_load("Could not start a background thread.".into());
         }
@@ -596,7 +601,7 @@ impl Browse {
     fn loaded(
         &self,
         generation: u64,
-        result: Result<Vec<ModDto>, ApiError>,
+        result: Result<Vec<ModDto>, String>,
         installed: HashSet<String>,
     ) {
         if generation != self.load_generation.get() {
@@ -604,7 +609,7 @@ impl Browse {
         }
         let mods = match result {
             Ok(mods) => mods,
-            Err(e) => return self.fail_load(catalog_error_text(&e)),
+            Err(text) => return self.fail_load(text),
         };
         // NSFW mods are not listed (no opt-in setting exists yet).
         let mods: Vec<ModDto> = mods.into_iter().filter(|m| !m.is_nsfw).collect();
@@ -723,16 +728,23 @@ impl Browse {
         let client = self.client.clone();
         let weak = self.weak.clone();
         let job_id = entry.id;
-        let started = spawn("shiv-install", move || {
-            let post = |update: Update| {
-                let id = job_id.clone();
-                let _ = weak.upgrade_in_event_loop(move |_| {
-                    with_browse(|b| b.job_update(&id, generation, update));
-                });
-            };
-            let result = run_install(&client, task, &cancel, post);
-            post(Update::Done(result));
-        });
+        let poster = move |update: Update| {
+            let id = job_id.clone();
+            let _ = weak.upgrade_in_event_loop(move |_| {
+                with_browse(|b| b.job_update(&id, generation, update));
+            });
+        };
+        let post = poster.clone();
+        let started = crate::spawn_worker(
+            "shiv-install",
+            move || run_install(&client, task, &cancel, post),
+            // `Done` clears the in-flight marker, even after a panic.
+            move |result| {
+                poster(Update::Done(
+                    result.unwrap_or_else(|text| Err(Failure::Message(text))),
+                ));
+            },
+        );
         if !started {
             self.job_update(
                 id,

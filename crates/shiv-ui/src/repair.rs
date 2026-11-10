@@ -12,7 +12,6 @@ use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::thread;
 
 use shiv_core::addons;
 use shiv_core::game::GamePaths;
@@ -289,13 +288,6 @@ fn run_action(deps: &Deps, action: &Action, names: &[(ModId, String)]) -> Outcom
     }
 }
 
-fn spawn(name: &str, f: impl FnOnce() + Send + 'static) -> bool {
-    thread::Builder::new()
-        .name(name.to_owned())
-        .spawn(f)
-        .is_ok()
-}
-
 // ---------------------------------------------------------------------------
 // Controller
 
@@ -371,15 +363,19 @@ impl Repair {
         });
         let deps = self.deps.clone();
         let weak = self.weak.clone();
-        let started = spawn("shiv-repair-scan", move || {
-            let result = scan(&deps);
-            // The check decodes the embedded game history (tens of MB) in
-            // this thread's arena; hand it back now that it is freed.
-            crate::release_freed_memory();
-            let _ = weak.upgrade_in_event_loop(move |_| {
-                with_repair(|r| r.scanned(generation, result));
-            });
-        });
+        let started = crate::spawn_worker(
+            "shiv-repair-scan",
+            move || scan(&deps),
+            move |result| {
+                // The check decodes the embedded game history (tens of MB) in
+                // this thread's arena; hand it back now that it is freed.
+                crate::release_freed_memory();
+                let result = result.and_then(|r| r);
+                let _ = weak.upgrade_in_event_loop(move |_| {
+                    with_repair(|r| r.scanned(generation, result));
+                });
+            },
+        );
         if !started {
             self.fail("Could not start a background thread.".into());
         }
@@ -456,13 +452,17 @@ impl Repair {
         };
         let deps = self.deps.clone();
         let weak = self.weak.clone();
-        let started = spawn("shiv-repair-action", move || {
-            let result = run_action(&deps, &action, &names);
-            crate::release_freed_memory();
-            let _ = weak.upgrade_in_event_loop(move |_| {
-                with_repair(|r| r.acted(failed_title, result));
-            });
-        });
+        let started = crate::spawn_worker(
+            "shiv-repair-action",
+            move || run_action(&deps, &action, &names),
+            move |result| {
+                crate::release_freed_memory();
+                let result = result.and_then(|r| r);
+                let _ = weak.upgrade_in_event_loop(move |_| {
+                    with_repair(|r| r.acted(failed_title, result));
+                });
+            },
+        );
         if !started {
             self.acted(
                 failed_title,

@@ -10,7 +10,6 @@ use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::thread;
 
 use shiv_core::game::GamePaths;
 use shiv_core::health::{self, Finding, FindingKind};
@@ -183,13 +182,6 @@ pub(crate) fn refresh() {
     });
 }
 
-fn spawn(name: &str, f: impl FnOnce() + Send + 'static) -> bool {
-    thread::Builder::new()
-        .name(name.to_owned())
-        .spawn(f)
-        .is_ok()
-}
-
 impl Launch {
     fn with_state(&self, f: impl FnOnce(&LaunchState<'_>)) {
         if let Some(app) = self.weak.upgrade() {
@@ -229,14 +221,20 @@ impl Launch {
         }
         let deps = self.deps.clone();
         let weak = self.weak.clone();
-        let started = spawn("shiv-health", move || {
-            let result = (deps.locate)()
-                .map(|paths| ((deps.check)(&paths), paths))
-                .map_err(|e| game_error_text(&e));
-            let _ = weak.upgrade_in_event_loop(move |_| {
-                with_launch(|l| l.checked(generation, purpose, result));
-            });
-        });
+        let started = crate::spawn_worker(
+            "shiv-health",
+            move || {
+                (deps.locate)()
+                    .map(|paths| ((deps.check)(&paths), paths))
+                    .map_err(|e| game_error_text(&e))
+            },
+            move |result| {
+                let result = result.and_then(|r| r);
+                let _ = weak.upgrade_in_event_loop(move |_| {
+                    with_launch(|l| l.checked(generation, purpose, result));
+                });
+            },
+        );
         if !started {
             self.status_from_check.set(true);
             self.finish(Err("Could not start a background thread.".into()));
@@ -321,16 +319,20 @@ impl Launch {
         });
         let launcher = self.deps.launch.clone();
         let weak = self.weak.clone();
-        let started = spawn("shiv-launch", move || {
-            let result = launcher(&paths).map_err(|e| format!("Could not launch Deadlock: {e}."));
-            let _ = weak.upgrade_in_event_loop(move |_| {
-                with_launch(|l| {
-                    if generation == l.generation.get() {
-                        l.finish(result.map(|()| "Deadlock is starting through Steam.".into()));
-                    }
+        let started = crate::spawn_worker(
+            "shiv-launch",
+            move || launcher(&paths).map_err(|e| format!("Could not launch Deadlock: {e}.")),
+            move |result| {
+                let result = result.and_then(|r| r);
+                let _ = weak.upgrade_in_event_loop(move |_| {
+                    with_launch(|l| {
+                        if generation == l.generation.get() {
+                            l.finish(result.map(|()| "Deadlock is starting through Steam.".into()));
+                        }
+                    });
                 });
-            });
-        });
+            },
+        );
         if !started {
             self.finish(Err("Could not start a background thread.".into()));
         }

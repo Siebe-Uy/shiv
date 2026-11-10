@@ -156,7 +156,12 @@ impl Cache {
                 return None;
             }
         }
-        let decoded = (self.fetch)(url).and_then(|bytes| decode(&bytes));
+        // A panicking decoder (a malformed image) counts as a failed image.
+        let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            (self.fetch)(url).and_then(|bytes| decode(&bytes))
+        }))
+        .ok()
+        .flatten();
         let mut inner = self.lock();
         match decoded {
             Some(img) => {
@@ -244,6 +249,13 @@ mod tests {
 
         assert!(cache.get_or_fetch("b").is_some());
         assert_eq!(fetches.load(Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn a_panicking_fetch_or_decode_counts_as_a_failed_image() {
+        let cache = Cache::with_fetcher(10 * THUMB_BYTES, |_| panic!("decoder bug"));
+        assert!(cache.get_or_fetch("https://x.test/bad.png").is_none());
+        assert!(cache.has_failed("https://x.test/bad.png"));
     }
 
     #[test]
