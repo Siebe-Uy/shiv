@@ -283,6 +283,8 @@ struct Entry {
     name: String,
     byline: SharedString,
     stats: SharedString,
+    /// "Updated 2026-11-08", or empty when the catalog has no date.
+    updated: SharedString,
     thumb_url: Option<String>,
     version: Option<String>,
     downloadable: bool,
@@ -297,15 +299,16 @@ impl Entry {
             (None, Some(c)) => c.to_owned(),
             (None, None) => String::new(),
         };
-        let mut stats = format!(
+        let stats = format!(
             "{} downloads \u{b7} {} likes",
             fmt_count(m.download_count),
             fmt_count(m.likes)
         );
-        if let Some(date) = m.last_updated().and_then(short_date) {
-            stats.push_str(" \u{b7} Updated ");
-            stats.push_str(date);
-        }
+        let updated = m
+            .last_updated()
+            .and_then(short_date)
+            .map(|d| format!("Updated {d}"))
+            .unwrap_or_default();
         Entry {
             thumb_url: thumb_url(&m),
             version: m.files_updated_at.or(m.remote_updated_at),
@@ -313,6 +316,7 @@ impl Entry {
             nsfw: m.is_nsfw,
             byline: byline.into(),
             stats: stats.into(),
+            updated: updated.into(),
             id: m.id,
             remote_id: m.remote_id,
             name: m.name,
@@ -445,6 +449,7 @@ impl Model for ModList {
             name: e.name.as_str().into(),
             byline: e.byline.clone(),
             stats: e.stats.clone(),
+            updated: e.updated.clone(),
             nsfw: e.nsfw,
             ..ModRow::default()
         };
@@ -1232,19 +1237,23 @@ mod tests {
             files_updated_at: files.map(str::to_owned),
             ..ModDto::default()
         };
-        let stats = |d| Entry::from_dto(d).stats.to_string();
+        let updated = |d| Entry::from_dto(d).updated.to_string();
         assert_eq!(
-            stats(m(
+            updated(m(
                 Some("2026-11-08T01:00:00Z"),
                 Some("2025-01-01T00:00:00Z")
             )),
-            "1,200 downloads \u{b7} 3 likes \u{b7} Updated 2026-11-08"
+            "Updated 2026-11-08"
         );
         assert_eq!(
-            stats(m(None, Some("2025-01-01T00:00:00Z"))),
-            "1,200 downloads \u{b7} 3 likes \u{b7} Updated 2025-01-01"
+            updated(m(None, Some("2025-01-01T00:00:00Z"))),
+            "Updated 2025-01-01"
         );
-        assert_eq!(stats(m(None, None)), "1,200 downloads \u{b7} 3 likes");
+        assert_eq!(updated(m(None, None)), "");
+        assert_eq!(
+            Entry::from_dto(m(None, None)).stats.as_str(),
+            "1,200 downloads \u{b7} 3 likes"
+        );
         assert_eq!(SORTS[1], ("Last updated", SortKey::Updated));
     }
 

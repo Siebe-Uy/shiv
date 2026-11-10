@@ -15,6 +15,8 @@ export struct ModRow {
     name: string,
     byline: string,
     stats: string,
+    // "Updated 2026-11-08", or "" when unknown.
+    updated: string,
     thumb: image,
     has-thumb: bool,
     // Marked NSFW; `thumb` is a blurred copy unless Show NSFW is on.
@@ -137,6 +139,12 @@ component ModRowView inherits Rectangle {
                 font-size: Theme.text-sm;
                 overflow: elide;
             }
+            if root.item.updated != "": Text {
+                text: root.item.updated;
+                color: Theme.text-faint;
+                font-size: Theme.text-sm;
+                overflow: elide;
+            }
         }
 
         VerticalLayout {
@@ -239,9 +247,11 @@ export component BrowsePage inherits Rectangle {
                 horizontal-stretch: 1;
             }
             HorizontalLayout {
+                horizontal-stretch: 0;
                 spacing: Theme.s1;
                 padding-right: Theme.s3;
                 Text {
+                    horizontal-stretch: 0;
                     text: "Show NSFW";
                     color: Theme.text-muted;
                     font-size: Theme.text-md;
