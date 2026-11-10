@@ -35,6 +35,8 @@ pub(crate) type Check = Arc<dyn Fn(&GamePaths) -> Vec<Finding> + Send + Sync>;
 pub(crate) type Launcher =
     Arc<dyn Fn(&GamePaths, &AtomicBool) -> Result<(), LaunchError> + Send + Sync>;
 pub(crate) type Running = Arc<dyn Fn() -> bool + Send + Sync>;
+/// Turns the mod mounts off (`true`) or restores them (`false`).
+pub(crate) type Vanilla = Arc<dyn Fn(&GamePaths, bool) -> std::io::Result<()> + Send + Sync>;
 
 /// Injectable so tests never touch the real install or start Steam.
 #[derive(Clone)]
@@ -44,6 +46,7 @@ pub(crate) struct Deps {
     pub launch: Launcher,
     /// Whether a Deadlock process exists.
     pub running: Running,
+    pub vanilla: Vanilla,
     /// Whether `running` can know (process scanning exists on this
     /// platform). Without it, Launch only sends the request.
     pub can_detect: bool,
@@ -60,6 +63,13 @@ impl Deps {
             check: Arc::new(health::check),
             launch: Arc::new(launch::launch_cancellable),
             running: Arc::new(shiv_core::game::is_running),
+            vanilla: Arc::new(|paths, on| {
+                if on {
+                    shiv_core::vanilla::enable(paths)
+                } else {
+                    shiv_core::vanilla::restore(paths)
+                }
+            }),
             can_detect: shiv_core::game::can_detect(),
             poll: Duration::from_secs(1),
             // Steam may update the game or process shaders before it starts.
@@ -214,6 +224,9 @@ enum Purpose {
     Background,
     /// Launch click: launch if clean, otherwise show the findings.
     Launch,
+    /// Launch without mods: no health check findings apply, the mod mounts
+    /// are off for this session.
+    Vanilla,
     /// Launch anyway on findings the user saw earlier (via Review): launch
     /// only if the disk still shows exactly those, otherwise show the new ones.
     Confirm(Vec<Finding>, bool),
@@ -243,6 +256,7 @@ pub fn attach(app: &App) {
 }
 
 pub(crate) fn attach_with(app: &App, deps: Deps) {
+    let can_detect = deps.can_detect;
     let rows = Rc::new(VecModel::default());
     let controller = Rc::new(Launch {
         weak: app.as_weak(),
@@ -258,6 +272,8 @@ pub(crate) fn attach_with(app: &App, deps: Deps) {
     let state = app.global::<LaunchState>();
     state.set_findings(ModelRc::from(rows));
     state.on_launch(|| with_launch(|l| l.launch_clicked()));
+    state.on_launch_vanilla(|| with_launch(|l| l.launch_vanilla_clicked()));
+    state.set_can_launch_vanilla(can_detect);
     state.on_launch_anyway(|| with_launch(|l| l.launch_anyway()));
     state.on_cancel_launch(|| with_launch(|l| l.cancel_launch()));
     state.on_cancel(|| with_launch(|l| l.with_state(|s| s.set_dialog_open(false))));
@@ -321,6 +337,12 @@ impl Launch {
         })
     }
 
+    fn launch_vanilla_clicked(&self) {
+        if !self.busy() {
+            self.check(Purpose::Vanilla);
+        }
+    }
+
     fn launch_clicked(&self) {
         if !self.busy() {
             self.check(Purpose::Launch);
@@ -329,7 +351,7 @@ impl Launch {
 
     /// Start watching: launch first when `launch` is given, otherwise the game
     /// already runs and only its exit is awaited.
-    fn start_watch(&self, launch: Option<GamePaths>) {
+    fn start_watch(&self, launch: Option<GamePaths>, vanilla: bool) {
         self.stop_watch();
         let generation = self.next_generation();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -353,11 +375,22 @@ impl Launch {
         let started = crate::spawn_worker(
             "shiv-launch",
             move || {
-                watch_game(&deps, launch.as_ref(), &cancel, move || {
+                let mods_off = vanilla.then_some(launch.as_ref()).flatten();
+                if let Some(paths) = mods_off
+                    && let Err(e) = (deps.vanilla)(paths, true)
+                {
+                    return WatchEnd::Failed(format!("Could not turn mods off: {e}."));
+                }
+                let end = watch_game(&deps, launch.as_ref(), &cancel, move || {
                     let _ = post_running.upgrade_in_event_loop(move |_| {
                         with_launch(|l| l.game_started(generation));
                     });
-                })
+                });
+                // Back on once the game is gone (or the launch failed).
+                if let Some(paths) = mods_off {
+                    let _ = (deps.vanilla)(paths, false);
+                }
+                end
             },
             move |result| {
                 let end = result.unwrap_or_else(WatchEnd::Failed);
@@ -470,15 +503,21 @@ impl Launch {
         }
         let deps = self.deps.clone();
         let weak = self.weak.clone();
+        let worker_purpose = purpose.clone();
         let started = crate::spawn_worker(
             "shiv-health",
             move || {
                 (deps.locate)()
                     .map(|paths| {
+                        let running = deps.can_detect && (deps.running)();
+                        // A session that ended without restoring (a crash)
+                        // must not leave mods off. Checks never run mid-launch.
+                        if !running && worker_purpose == Purpose::Background {
+                            let _ = (deps.vanilla)(&paths, false);
+                        }
                         // A repair package built for other mods or another
                         // game build keeps loading until it is rebuilt or removed.
                         let stale = shiv_repair::overlay_state(&paths) == OverlayState::Stale;
-                        let running = deps.can_detect && (deps.running)();
                         ((deps.check)(&paths), stale, paths, running)
                     })
                     .map_err(|e| game_error_text(&e))
@@ -532,7 +571,7 @@ impl Launch {
             // Started outside Shiv (or before it): follow it until it exits
             // instead of launching a second time.
             if self.watch.borrow().is_none() {
-                self.start_watch(None);
+                self.start_watch(None, false);
             }
             if purpose != Purpose::Background {
                 self.with_state(|s| s.set_status_text(ALREADY_RUNNING_TEXT.into()));
@@ -553,12 +592,13 @@ impl Launch {
                 return;
             }
             Purpose::Launch => problems == 0,
+            Purpose::Vanilla => true,
             Purpose::Confirm(seen, seen_stale) => {
                 problems == 0 || (*seen == findings && *seen_stale == stale)
             }
         };
         if launch_now {
-            self.start_launch(paths);
+            self.start_watch(Some(paths), purpose == Purpose::Vanilla);
         } else {
             self.fresh_dialog.set(true);
             self.with_state(|s| s.set_dialog_open(true));
@@ -575,15 +615,11 @@ impl Launch {
             return;
         };
         if self.fresh_dialog.get() {
-            self.start_launch(paths);
+            self.start_watch(Some(paths), false);
         } else {
             // Opened via Review: those findings may be stale.
             self.check(Purpose::Confirm(findings, stale));
         }
-    }
-
-    fn start_launch(&self, paths: GamePaths) {
-        self.start_watch(Some(paths));
     }
 
     /// Clear `busy` and show the outcome below the Launch button.

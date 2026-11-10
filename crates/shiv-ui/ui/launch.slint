@@ -32,6 +32,10 @@ export global LaunchState {
     in-out property <bool> dialog-open;
 
     callback launch();
+    // Launch with the mod mounts off for this session.
+    callback launch-vanilla();
+    // Only where the game process can be watched, so mods can be turned back on.
+    in property <bool> can-launch-vanilla: false;
     callback launch-anyway();
     // Stop waiting for the game to start.
     callback cancel-launch();
@@ -90,6 +94,12 @@ export component LaunchPanel inherits VerticalLayout {
         primary: true;
         disabled: LaunchState.busy || LaunchState.running;
         clicked => { LaunchState.launch(); }
+    }
+
+    if LaunchState.can-launch-vanilla: Button {
+        text: "Launch without mods";
+        disabled: LaunchState.busy || LaunchState.running;
+        clicked => { LaunchState.launch-vanilla(); }
     }
 }
 

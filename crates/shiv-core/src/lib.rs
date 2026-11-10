@@ -11,3 +11,4 @@ pub mod link;
 pub mod perf;
 mod platform;
 pub mod sidecar;
+pub mod vanilla;
