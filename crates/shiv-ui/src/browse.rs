@@ -92,7 +92,7 @@ pub(crate) fn fmt_count(n: u64) -> String {
     out
 }
 
-fn fmt_mb(bytes: u64) -> String {
+pub(crate) fn fmt_mb(bytes: u64) -> String {
     format!("{:.1} MB", bytes as f64 / 1_000_000.0)
 }
 
@@ -791,7 +791,12 @@ struct InstallTask {
 }
 
 enum Update {
-    Progress { progress: f32, text: String },
+    Progress {
+        progress: f32,
+        text: String,
+        done: u64,
+        total: Option<u64>,
+    },
     Installing,
     Done(Result<(), Failure>),
 }
@@ -836,7 +841,12 @@ fn run_install(
             Some(_) => (step.min(100) as f32 / 100.0, format!("{}%", step.min(100))),
             None => (-1.0, fmt_mb(done)),
         };
-        post(Update::Progress { progress, text });
+        post(Update::Progress {
+            progress,
+            text,
+            done,
+            total,
+        });
     });
     match fetched {
         Err(ApiError::Cancelled) => return Err(Failure::Cancelled),
@@ -888,6 +898,16 @@ pub(crate) fn catalog_nsfw(id: &str) -> Option<bool> {
     let mut out = None;
     with_browse(|b| out = b.nsfw_ids.borrow().as_ref().map(|ids| ids.contains(id)));
     out
+}
+
+/// Cancel a running install (from the Downloads screen).
+pub(crate) fn cancel_install(id: &str) {
+    with_browse(|b| b.cancel(id));
+}
+
+/// Start an install again (from the Downloads screen).
+pub(crate) fn retry_install(id: &str) {
+    with_browse(|b| b.install(id));
 }
 
 /// Re-read which mods are installed, so Install comes back after an
@@ -1378,12 +1398,17 @@ impl Browse {
         let name = self.list.find(id).map_or_else(|| id.to_owned(), |e| e.name);
         let mut files = match result {
             Ok(files) => files,
-            Err(text) => return self.set_banner(&format!("Could not install {name}. {text}")),
+            Err(text) => {
+                crate::downloads::failed_to_start(id, &name, &text);
+                return self.set_banner(&format!("Could not install {name}. {text}"));
+            }
         };
         match files.len() {
-            0 => self.set_banner(&format!(
-                "Could not install {name}. This mod has no downloadable files."
-            )),
+            0 => {
+                let text = "This mod has no downloadable files.";
+                crate::downloads::failed_to_start(id, &name, text);
+                self.set_banner(&format!("Could not install {name}. {text}"));
+            }
             1 => {
                 let file = files.remove(0);
                 self.start_job(id, file);
@@ -1453,6 +1478,7 @@ impl Browse {
             .borrow_mut()
             .insert(id.to_owned(), generation);
         self.list.changed(id);
+        crate::downloads::started(id, &entry.name);
 
         let task = InstallTask {
             mod_id: entry.id.clone(),
@@ -1505,6 +1531,7 @@ impl Browse {
             // install lock) and deletes the partial file. Its progress updates
             // are ignored from now on; its `Done` clears `in_flight`.
             job.cancel.store(true, Ordering::Relaxed);
+            crate::downloads::finished(id, crate::downloads::Outcome::Cancelled);
             self.list.changed(id);
         }
     }
@@ -1534,21 +1561,38 @@ impl Browse {
             return;
         }
         match update {
-            Update::Progress { progress, text } => {
+            Update::Progress {
+                progress,
+                text,
+                done,
+                total,
+            } => {
                 if let Some(job) = self.list.jobs.borrow_mut().get_mut(id) {
                     job.phase = Phase::Downloading { progress, text };
+                    crate::downloads::progress(id, done, total);
                 }
             }
             Update::Installing => {
                 if let Some(job) = self.list.jobs.borrow_mut().get_mut(id) {
                     job.phase = Phase::Installing;
+                    crate::downloads::installing(id);
                 }
             }
             Update::Done(result) => {
                 self.list.jobs.borrow_mut().remove(id);
-                if let Err(Failure::Message(text)) = result {
-                    let name = self.list.find(id).map_or_else(|| id.to_owned(), |e| e.name);
-                    self.set_banner(&format!("Could not install {name}. {text}"));
+                match result {
+                    Ok(()) => crate::downloads::finished(id, crate::downloads::Outcome::Done),
+                    Err(Failure::Cancelled) => {
+                        crate::downloads::finished(id, crate::downloads::Outcome::Cancelled);
+                    }
+                    Err(Failure::Message(text)) => {
+                        crate::downloads::finished(
+                            id,
+                            crate::downloads::Outcome::Failed(text.clone()),
+                        );
+                        let name = self.list.find(id).map_or_else(|| id.to_owned(), |e| e.name);
+                        self.set_banner(&format!("Could not install {name}. {text}"));
+                    }
                 }
             }
         }
@@ -2005,6 +2049,8 @@ pub(crate) mod test_hooks {
                 Update::Progress {
                     progress: 0.5,
                     text: "50%".into(),
+                    done: 500,
+                    total: Some(1000),
                 },
             );
         });

@@ -8,6 +8,7 @@ mod browse;
 mod crosshair;
 mod describe;
 mod detail_tabs;
+mod downloads;
 mod installed;
 mod launch;
 mod performance;
@@ -107,6 +108,7 @@ fn main() -> Result<(), slint::PlatformError> {
     crosshair::attach(&app);
     performance::attach(&app, &api_url);
     profiles::attach(&app);
+    downloads::attach(&app);
     // Debug builds only: open on another screen (e.g. for screenshots); 0 is Browse.
     #[cfg(debug_assertions)]
     if let Some(n) = std::env::var("SHIV_SCREEN")
@@ -2301,6 +2303,7 @@ mod tests {
     fn install_cancel_and_failure(api: &str) {
         let app = App::new().expect("app");
         browse::attach(&app, api);
+        downloads::attach(&app);
         app.show().expect("show");
         let state = app.global::<BrowseState>();
         let ready = |a: &App| a.global::<BrowseState>().get_load_state() == LoadState::Ready;
@@ -2344,6 +2347,12 @@ mod tests {
         assert_eq!(row_state(&app), Some(InstallState::Downloading));
         let first = hooks::job_generation("m1").expect("job");
         assert_eq!(hooks::in_flight("m1"), Some(first));
+        let downloads = app.global::<DownloadsState>();
+        let transfer = |a: &App| a.global::<DownloadsState>().get_rows().row_data(0);
+        assert_eq!(downloads.get_rows().row_count(), 1);
+        assert_eq!(transfer(&app).unwrap().name.as_str(), "Test Mod");
+        assert_eq!(transfer(&app).unwrap().phase, DownloadPhase::Downloading);
+        assert_eq!(downloads.get_active_count(), 1);
         // A second Install while the job runs is a no-op.
         state.invoke_install("m1".into());
         assert_eq!(hooks::job_generation("m1"), Some(first));
@@ -2353,6 +2362,8 @@ mod tests {
         state.invoke_cancel("m1".into());
         assert_eq!(hooks::job_generation("m1"), None);
         assert_eq!(row_state(&app), Some(InstallState::Cancelling));
+        assert_eq!(transfer(&app).unwrap().phase, DownloadPhase::Cancelled);
+        assert_eq!(downloads.get_active_count(), 0);
         state.invoke_install("m1".into());
         assert_eq!(hooks::job_generation("m1"), None);
         assert_eq!(hooks::in_flight("m1"), Some(first));
@@ -2363,6 +2374,7 @@ mod tests {
         assert_eq!(row_state(&app), Some(InstallState::Cancelling));
         // Its Done (an error) clears the marker without a banner.
         hooks::post_done_error("m1", first);
+        assert_eq!(transfer(&app).unwrap().phase, DownloadPhase::Cancelled);
         assert_eq!(hooks::in_flight("m1"), None);
         assert_eq!(row_state(&app), Some(InstallState::Idle));
         assert_eq!(state.get_banner_text(), "");
@@ -2380,6 +2392,12 @@ mod tests {
                 .starts_with("Could not install Test Mod.")
         );
         assert_eq!(row_state(&app), Some(InstallState::Idle));
+        // The failed attempt replaces the old row, with the reason.
+        assert_eq!(downloads.get_rows().row_count(), 1);
+        assert_eq!(transfer(&app).unwrap().phase, DownloadPhase::Failed);
+        assert!(!transfer(&app).unwrap().detail.is_empty());
+        downloads.invoke_clear_finished();
+        assert_eq!(downloads.get_rows().row_count(), 0);
         click(&app, "Dismiss");
         assert_eq!(state.get_banner_text(), "");
     }

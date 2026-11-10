@@ -1,0 +1,121 @@
+// Downloads: installs in progress and recently finished ones.
+
+import { ListView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Button, TextButton, ProgressBar } from "widgets.slint";
+import { CenteredMessage } from "browse.slint";
+
+export enum DownloadPhase { downloading, installing, done, failed, cancelled }
+
+export struct TransferRow {
+    id: string,
+    name: string,
+    phase: DownloadPhase,
+    // 0..1, negative when the size is unknown.
+    progress: float,
+    // "12.3 MB of 52.0 MB · 4.2 MB/s", "Installing", "Finished 2 minutes ago", an error.
+    detail: string,
+}
+
+export global DownloadsState {
+    in property <[TransferRow]> rows;
+    in property <int> active-count: 0;
+    callback cancel(string);
+    callback retry(string);
+    callback clear-finished();
+}
+
+component DownloadRowView inherits Rectangle {
+    in property <TransferRow> item;
+    height: 58px + 2 * Theme.s1 + 1px;
+
+    HorizontalLayout {
+        padding: Theme.s1;
+        padding-left: Theme.s2;
+        padding-right: Theme.s2;
+        spacing: Theme.s2;
+
+        VerticalLayout {
+            alignment: center;
+            spacing: Theme.s1;
+            horizontal-stretch: 1;
+            Text {
+                text: root.item.name;
+                color: Theme.text;
+                font-size: Theme.text-lg;
+                font-weight: 600;
+                overflow: elide;
+            }
+            if root.item.phase == DownloadPhase.downloading: ProgressBar {
+                progress: root.item.progress;
+            }
+            Text {
+                text: root.item.detail;
+                color: root.item.phase == DownloadPhase.failed ? Theme.danger : Theme.text-muted;
+                font-size: Theme.text-md;
+                overflow: elide;
+            }
+        }
+
+        HorizontalLayout {
+            width: 96px;
+            alignment: end;
+            if root.item.phase == DownloadPhase.downloading: TextButton {
+                text: "Cancel";
+                clicked => { DownloadsState.cancel(root.item.id); }
+            }
+            if root.item.phase == DownloadPhase.failed || root.item.phase == DownloadPhase.cancelled: Button {
+                text: "Retry";
+                clicked => { DownloadsState.retry(root.item.id); }
+            }
+        }
+    }
+
+    Rectangle {
+        x: Theme.s1;
+        y: parent.height - 1px;
+        width: parent.width - Theme.s1;
+        height: 1px;
+        background: Theme.border;
+    }
+}
+
+export component DownloadsPage inherits Rectangle {
+    background: Theme.bg;
+
+    VerticalLayout {
+        padding: Theme.s3;
+        padding-bottom: 0px;
+        spacing: Theme.s2;
+
+        HorizontalLayout {
+            spacing: Theme.s2;
+            Text {
+                text: "Downloads";
+                color: Theme.text;
+                font-size: Theme.text-xl;
+                font-weight: 600;
+                horizontal-stretch: 1;
+            }
+            TextButton {
+                text: "Clear finished";
+                clicked => { DownloadsState.clear-finished(); }
+            }
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+
+            if DownloadsState.rows.length == 0: CenteredMessage {
+                title: "No downloads yet";
+                detail: "Mods you install from Browse show their progress here.";
+            }
+
+            ListView {
+                for row in DownloadsState.rows: DownloadRowView {
+                    item: row;
+                }
+            }
+        }
+    }
+}
