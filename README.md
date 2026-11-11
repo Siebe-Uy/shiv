@@ -43,9 +43,14 @@ Notes on the toolkit choice and repair port are in [`docs/`](docs/).
 
 ### Arch Linux (AUR)
 
+**Not published yet.** AUR account registration is currently paused, so the `shiv-bin` and
+`shiv-git` packages are not on the AUR. Until they are, use the AppImage below, or build the
+package yourself from the drafts in [`packaging/aur/`](packaging/aur/):
+
 ```sh
-yay -S shiv-bin      # prebuilt
-yay -S shiv-git      # built from the latest source
+git clone https://github.com/Siebe-Uy/shiv.git
+cd shiv/packaging/aur/shiv-git
+makepkg -si
 ```
 
 ### Any Linux: AppImage
