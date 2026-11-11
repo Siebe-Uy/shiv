@@ -99,7 +99,7 @@ jobs:
           cp target/release/shiv.exe "dist/Shiv-$version-x64-portable.exe"
           if ! command -v iscc >/dev/null; then choco install innosetup -y --no-progress; fi
           iscc="$(command -v iscc || echo '/c/Program Files (x86)/Inno Setup 6/ISCC.exe')"
-          "$iscc" "/DAppVersion=$version" packaging/windows/shiv.iss
+          MSYS2_ARG_CONV_EXCL="*" "$iscc" "/DAppVersion=$version" packaging/windows/shiv.iss
           cd dist
           for f in *.exe; do sha256sum "$f" > "$f.sha256"; done
       - uses: actions/upload-artifact@v4
