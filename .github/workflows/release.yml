@@ -1,6 +1,6 @@
 name: Release
 
-# Pushing a tag like v0.1.0 builds the AppImage and Flatpak and publishes a GitHub release.
+# Pushing a tag like v0.1.0 builds the AppImage, Flatpak and Windows files and publishes a GitHub release.
 # Running the workflow by hand builds the AppImage and keeps it as an artifact
 # only, so the packaging can be tested without releasing anything.
 on:
@@ -80,9 +80,36 @@ jobs:
           name: flatpak
           path: dist/*
 
+  windows:
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      - name: Build
+        run: cargo build --release -p shiv-ui
+      - name: Package
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/shiv-ui/Cargo.toml | head -1)
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then version="${GITHUB_REF_NAME#v}"; fi
+          mkdir -p dist
+          cp target/release/shiv.exe "dist/Shiv-$version-x64-portable.exe"
+          if ! command -v iscc >/dev/null; then choco install innosetup -y --no-progress; fi
+          iscc="$(command -v iscc || echo '/c/Program Files (x86)/Inno Setup 6/ISCC.exe')"
+          "$iscc" "/DAppVersion=$version" packaging/windows/shiv.iss
+          cd dist
+          for f in *.exe; do sha256sum "$f" > "$f.sha256"; done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*
+
   publish:
     if: github.ref_type == 'tag'
-    needs: [appimage, flatpak]
+    needs: [appimage, flatpak, windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write

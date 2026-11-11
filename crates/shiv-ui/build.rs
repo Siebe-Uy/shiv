@@ -6,5 +6,15 @@ fn main() -> Result<(), slint_build::CompileError> {
     let config = slint_build::CompilerConfiguration::new()
         .with_style("fluent-dark".into())
         .with_debug_info(debug);
-    slint_build::compile_with_config("ui/app.slint", config)
+    slint_build::compile_with_config("ui/app.slint", config)?;
+
+    #[cfg(windows)]
+    {
+        let mut res = winresource::WindowsResource::new();
+        res.set_icon("../../packaging/windows/shiv.ico");
+        res.set("ProductName", "Shiv");
+        res.set("FileDescription", "Shiv, Deadlock mod manager");
+        res.compile().expect("embedding the Windows resources failed");
+    }
+    Ok(())
 }

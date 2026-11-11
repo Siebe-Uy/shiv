@@ -1,0 +1,4 @@
+# Windows release builds carry the C runtime, so the portable exe runs without
+# the Visual C++ redistributable.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

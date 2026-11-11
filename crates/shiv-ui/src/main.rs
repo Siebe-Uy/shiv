@@ -1,5 +1,8 @@
 //! Shiv desktop UI: a thin Slint shell over shiv-core and shiv-api.
 
+// A GUI app on Windows: no console window behind it.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 slint::include_modules!();
 
 use shiv_core::game::{self, GameError, GamePaths};
