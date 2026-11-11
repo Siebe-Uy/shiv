@@ -984,8 +984,10 @@ pub fn attach(app: &App, api_url: &str) -> Arc<thumbs::Cache> {
             |b, url, ok| {
                 if ok {
                     b.list.thumb_ready(url);
-                    b.strip_ready(url);
                 }
+                // A failure matters to the strip too: it falls back from the
+                // small variant to the full image, which needs a refresh.
+                b.strip_ready(url);
             },
         ),
         cache: cache.clone(),
