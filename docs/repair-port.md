@@ -96,3 +96,12 @@ and app-data layout. Shiv's `analyze`/`apply` API (Task 9b) replaces it.
   old app would have asked about.
 - `overlay_state(paths)` says whether the package still matches the installed
   mods and game build.
+
+## Staying current
+
+`docs/upstream.json` records the upstream commit the copied code and assets
+were taken from and the upstream paths Shiv copied. The `Upstream watch`
+workflow compares them weekly and opens an issue when they change; after
+porting, set `commit` to the new upstream commit. The `API contract` workflow
+runs `crates/shiv-api/tests/live_api.rs` against the live Deadlock Mods API
+daily and opens an issue when the API stops matching Shiv's types.

@@ -1,0 +1,15 @@
+{
+  "repo": "deadlock-mod-manager/deadlock-mod-manager",
+  "branch": "main",
+  "commit": "aeca8fa7fc5a27132389cea2581594044edca782",
+  "paths": [
+    "apps/desktop/src-tauri/src/mod_manager/mod_health.rs",
+    "apps/desktop/src-tauri/src/mod_manager/vdata_history.rs",
+    "apps/desktop/src-tauri/src/mod_manager/localization_overlay",
+    "apps/desktop/src-tauri/assets/",
+    "packages/source2-model/",
+    "packages/vpk-parser/",
+    "packages/kv-parser/",
+    "packages/vpkmanager/"
+  ]
+}

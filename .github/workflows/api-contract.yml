@@ -1,0 +1,47 @@
+name: API contract
+
+# Daily check that the Deadlock Mods API still looks the way Shiv expects. A
+# failure is retried once after ten minutes (the API may just be down); a second
+# failure opens an issue.
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  contract:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      - name: Run the live API tests
+        id: first
+        continue-on-error: true
+        run: cargo test -p shiv-api --test live_api -- --ignored
+      - name: Retry once after ten minutes
+        id: second
+        if: steps.first.outcome == 'failure'
+        run: |
+          sleep 600
+          cargo test -p shiv-api --test live_api -- --ignored
+      - name: Open an issue
+        if: failure() && steps.second.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh label create api-contract --color B60205 --description "The Deadlock Mods API changed" || true
+          if [[ -n "$(gh issue list --label api-contract --state open --json number --jq '.[0].number')" ]]; then
+            echo "An api-contract issue is already open."
+            exit 0
+          fi
+          gh issue create --label api-contract \
+            --title "The Deadlock Mods API no longer matches Shiv" \
+            --body "The daily live API test failed twice, ten minutes apart. Shiv may show no mods or fail to download. Run: \`cargo test -p shiv-api --test live_api -- --ignored\`. Failing run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"

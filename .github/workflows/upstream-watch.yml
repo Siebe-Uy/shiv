@@ -1,0 +1,61 @@
+name: Upstream watch
+
+# Weekly: compare the original Deadlock Mod Manager with the commit Shiv's
+# copied code was taken from (docs/upstream.json) and open an issue when the
+# paths Shiv copied have changed. Nothing is changed automatically; porting
+# upstream fixes needs a person (see docs/repair-port.md).
+on:
+  schedule:
+    - cron: "43 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Look for upstream changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          repo=$(jq -r .repo docs/upstream.json)
+          branch=$(jq -r .branch docs/upstream.json)
+          pin=$(jq -r .commit docs/upstream.json)
+          paths=$(jq -c .paths docs/upstream.json)
+
+          gh api --paginate "repos/$repo/compare/$pin...$branch" \
+            --jq '.files[]? | .filename' > all-files.txt
+          jq -Rr --argjson p "$paths" \
+            'select(test("(^|/)(CHANGELOG\\.md|package\\.json)$") | not)
+             | select(. as $f | any($p[]; . as $x | $f | startswith($x)))' \
+            all-files.txt > changed.txt || true
+          head="$(gh api "repos/$repo/commits/$branch" --jq .sha)"
+          echo "Upstream $branch is at $head; pinned at $pin."
+          if [[ ! -s changed.txt ]]; then
+            echo "None of the watched paths changed."
+            exit 0
+          fi
+          cat changed.txt
+
+          gh label create upstream --color 0E8A16 --description "Changes in the original Deadlock Mod Manager" || true
+          existing="$(gh issue list --label upstream --state open --json number --jq '.[0].number')"
+          if [[ -n "$existing" ]]; then
+            echo "Issue #$existing is already open."
+            exit 0
+          fi
+          {
+            echo "Files Shiv copied have changed upstream since \`${pin:0:8}\`:"
+            echo
+            sed 's/^/- `/; s/$/`/' changed.txt | head -50
+            echo
+            echo "Compare: https://github.com/$repo/compare/$pin...${head:0:8}"
+            echo
+            echo "Review the changes, port what matters, then set \`commit\` in \`docs/upstream.json\` to the new commit and close this issue."
+          } > body.md
+          gh issue create --label upstream \
+            --title "Upstream Deadlock Mod Manager changed (${pin:0:8}...${head:0:8})" \
+            --body-file body.md
