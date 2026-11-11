@@ -44,7 +44,7 @@ mod file {
     static LOG: Mutex<Option<File>> = Mutex::new(None);
 
     fn path() -> Option<PathBuf> {
-        shiv_core::platform::cache_dir().map(|d| d.join("shiv").join("shiv.log"))
+        shiv_core::perf::CatalogCache::default_dir().map(|d| d.join("shiv.log"))
     }
 
     pub(super) fn start() {
