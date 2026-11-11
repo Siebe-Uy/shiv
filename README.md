@@ -136,6 +136,22 @@ and bundle code under their own licenses (see `LICENSE-ValveResourceFormat` and
 
 Shiv is not affiliated with Valve.
 
+## Code signing policy
+
+Windows releases are signed with a certificate from the
+[SignPath Foundation](https://signpath.org/), through
+[SignPath.io](https://signpath.io/), which provides free code signing for open-source projects.
+
+- **What is signed:** only the Windows files built from this repository's tagged
+  releases by the public GitHub Actions workflow (`.github/workflows/release.yml`).
+  Nothing is signed from a developer's machine.
+- **Roles:** [Siebe-Uy](https://github.com/Siebe-Uy) is the committer, reviewer and approver
+  of every signing request.
+- **Privacy:** Shiv has no telemetry and sends no personal data. It only
+  fetches mod data and images from the [Deadlock Mods](https://deadlockmods.app) API,
+  GameBanana and their image hosts, and downloads the mods you choose to install.
+  It never uploads anything about you or your files.
+
 ## License
 
 Shiv is free software under the [GNU General Public License v3.0](LICENSE) (`GPL-3.0`).
