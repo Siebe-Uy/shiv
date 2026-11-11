@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="shiv-banner-dark.png" alt="Shiv: Deadlock mod manager. Lean, fast, no bloat. Built in Rust." width="100%">
+  <img src="style/png/shiv-banner-dark.png" alt="Shiv: Deadlock mod manager. Lean, fast, no bloat. Built in Rust." width="100%">
 </p>
 
 <p align="center">
