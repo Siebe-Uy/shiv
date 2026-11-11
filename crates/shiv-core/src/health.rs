@@ -250,6 +250,11 @@ fn check_vpk(path: &Path, findings: &mut Vec<Finding>) {
 
     let mut chunk_needs: BTreeMap<u16, u64> = BTreeMap::new();
     for e in &entries {
+        // An empty entry reads no data. Some packers still give it a
+        // placeholder offset (0xFFFFFFFF), which must not count as truncation.
+        if e.entry_length == 0 {
+            continue;
+        }
         let end = u64::from(e.entry_offset) + u64::from(e.entry_length);
         if e.archive_index == INLINE_ARCHIVE {
             if data_start + end > len {
@@ -258,7 +263,7 @@ fn check_vpk(path: &Path, findings: &mut Vec<Finding>) {
                     e.full_path
                 )));
             }
-        } else if e.entry_length > 0 {
+        } else {
             let need = chunk_needs.entry(e.archive_index).or_default();
             *need = (*need).max(end);
         }

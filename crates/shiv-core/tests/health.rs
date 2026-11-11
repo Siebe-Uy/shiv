@@ -67,6 +67,37 @@ fn vpk_bytes() -> Vec<u8> {
     out
 }
 
+/// Like [`vpk_bytes`], plus an empty `dir/readme.txt` with the placeholder
+/// offset 0xFFFFFFFF that some packers write for empty files.
+fn vpk_with_empty_placeholder_entry() -> Vec<u8> {
+    let mut tree = Vec::new();
+    tree.extend_from_slice(b"txt\0dir\0a\0");
+    tree.extend_from_slice(&0u32.to_le_bytes()); // crc
+    tree.extend_from_slice(&0u16.to_le_bytes()); // preload bytes
+    tree.extend_from_slice(&0x7fffu16.to_le_bytes()); // archive index: inline
+    tree.extend_from_slice(&0u32.to_le_bytes()); // offset
+    tree.extend_from_slice(&5u32.to_le_bytes()); // length
+    tree.extend_from_slice(&0xffffu16.to_le_bytes()); // terminator
+    tree.extend_from_slice(b"readme\0");
+    tree.extend_from_slice(&0u32.to_le_bytes()); // crc
+    tree.extend_from_slice(&0u16.to_le_bytes()); // preload bytes
+    tree.extend_from_slice(&0x7fffu16.to_le_bytes()); // archive index: inline
+    tree.extend_from_slice(&u32::MAX.to_le_bytes()); // placeholder offset
+    tree.extend_from_slice(&0u32.to_le_bytes()); // length: empty
+    tree.extend_from_slice(&0xffffu16.to_le_bytes()); // terminator
+    tree.extend_from_slice(b"\0\0\0");
+    let data = b"hello";
+    let mut out = Vec::new();
+    out.extend_from_slice(&0x55aa_1234u32.to_le_bytes());
+    out.extend_from_slice(&2u32.to_le_bytes());
+    out.extend_from_slice(&(tree.len() as u32).to_le_bytes());
+    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    out.extend_from_slice(&[0u8; 12]);
+    out.extend_from_slice(&tree);
+    out.extend_from_slice(data);
+    out
+}
+
 struct Game {
     _dir: tempfile::TempDir,
     paths: GamePaths,
@@ -145,6 +176,13 @@ fn zero_byte_vpk_is_reported_even_when_disabled() {
         names,
         ["pak01_dir.vpk", "pak02_dir.vpk.disabled", "pak03_000.vpk"]
     );
+}
+
+#[test]
+fn empty_entry_with_placeholder_offset_is_not_truncation() {
+    let game = Game::new();
+    game.put("pak01_dir.vpk", &vpk_with_empty_placeholder_entry());
+    assert_eq!(game.check(), Vec::<Finding>::new());
 }
 
 #[test]
