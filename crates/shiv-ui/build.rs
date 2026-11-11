@@ -14,7 +14,8 @@ fn main() -> Result<(), slint_build::CompileError> {
         res.set_icon("../../packaging/windows/shiv.ico");
         res.set("ProductName", "Shiv");
         res.set("FileDescription", "Shiv, Deadlock mod manager");
-        res.compile().expect("embedding the Windows resources failed");
+        res.compile()
+            .expect("embedding the Windows resources failed");
     }
     Ok(())
 }
