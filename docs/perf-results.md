@@ -76,10 +76,6 @@ Scroll CPU is about 6 % higher with the fixed thresholds (about +0.9 points of o
 - Repair (tiny fixture): pass after fix round 1. Shown and applied stay at about 120.5 MB after a full scroll (85 MB in a fresh process); peak 145.7-147.5 MB across three runs, just under the target, reached only when a Repair check runs on top of a full thumbnail cache. Before the fix: FAIL (313 MB, peak 394 MB).
 - Thumbnails: placeholders show while scrolling at 25,000 px/s; they fill in when scrolling stops (LRU cache is bounded).
 
-## Scrolling feel: OPEN (owner)
-
-Not judgeable by the agent. Measured only: scripted wheel scrolling cost about 16 % of one core on the 941x1030 window. Frame time was not instrumented. Owner must judge feel on the 144 Hz 2560x1440 monitor and on the other monitor (Wayland; X11 if available).
-
 ## Checks
 
 - `cargo fmt --all --check`: clean (after formatting `thumbs.rs` and the kv-parser fixes).
