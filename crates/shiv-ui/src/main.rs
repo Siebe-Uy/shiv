@@ -14,6 +14,7 @@ mod detail_tabs;
 mod downloads;
 mod installed;
 mod launch;
+mod log;
 mod performance;
 mod profiles;
 mod repair;
@@ -100,6 +101,15 @@ pub(crate) fn open_repair(app: &App) {
 }
 
 fn main() -> Result<(), slint::PlatformError> {
+    log::init();
+    let result = run();
+    if let Err(e) = &result {
+        log::line(format_args!("exited with an error: {e}"));
+    }
+    result
+}
+
+fn run() -> Result<(), slint::PlatformError> {
     tune_allocator();
     let app = App::new()?;
     // Override for testing (e.g. an unreachable URL to see the Retry state).

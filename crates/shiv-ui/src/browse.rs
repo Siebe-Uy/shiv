@@ -440,7 +440,7 @@ impl ThumbLoader {
                 // anything else only costs this one worker.
                 |result| {
                     if let Err(text) = result {
-                        eprintln!("thumbnail worker stopped: {text}");
+                        crate::log::line(format_args!("thumbnail worker stopped: {text}"));
                     }
                 },
             );
@@ -1175,6 +1175,7 @@ impl Browse {
     }
 
     fn fail_load(&self, text: String) {
+        crate::log::line(format_args!("catalog load failed: {text}"));
         self.with_state(|s| {
             s.set_error_text(text.into());
             s.set_load_state(LoadState::Failed);
