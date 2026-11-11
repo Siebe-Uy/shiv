@@ -1,0 +1,40 @@
+app-id: io.github.Siebe_Uy.shiv
+runtime: org.freedesktop.Platform
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: shiv
+
+finish-args:
+  - --share=network
+  - --socket=wayland
+  - --socket=fallback-x11
+  # Software renderer: no GPU access needed.
+  # Native Steam, and the Flatpak Steam's data folder. Shiv edits gameinfo.gi
+  # and writes mods into the game folder, so this is read-write. Steam libraries
+  # on other drives need `flatpak override --user --filesystem=<path>`.
+  - --filesystem=~/.local/share/Steam
+  - --filesystem=~/.steam
+  - --filesystem=~/.var/app/com.valvesoftware.Steam/.local/share/Steam
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/shiv/cargo
+
+modules:
+  - name: shiv
+    buildsystem: simple
+    build-commands:
+      - cargo --offline fetch --manifest-path Cargo.toml --verbose
+      - cargo --offline build --release --verbose -p shiv-ui
+      - install -Dm755 target/release/shiv -t /app/bin
+      - install -Dm644 packaging/flatpak/io.github.Siebe_Uy.shiv.desktop -t /app/share/applications
+      - install -Dm644 packaging/flatpak/io.github.Siebe_Uy.shiv.metainfo.xml -t /app/share/metainfo
+      - install -Dm644 style/svg/shiv-icon.svg /app/share/icons/hicolor/scalable/apps/io.github.Siebe_Uy.shiv.svg
+    sources:
+      - type: dir
+        path: ../..
+        skip: [target, dist, .git]
+      - cargo-sources.json

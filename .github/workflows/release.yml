@@ -1,6 +1,6 @@
 name: Release
 
-# Pushing a tag like v0.1.0 builds the AppImage and publishes a GitHub release.
+# Pushing a tag like v0.1.0 builds the AppImage and Flatpak and publishes a GitHub release.
 # Running the workflow by hand builds the AppImage and keeps it as an artifact
 # only, so the packaging can be tested without releasing anything.
 on:
@@ -18,6 +18,8 @@ env:
   LINUXDEPLOY_SHA256: 4648f278ab3ef31f819e67c30d50f462640e5365a77637d7e6f2ad9fd0b4522a
   APPIMAGE_PLUGIN_URL: https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-x86_64.AppImage
   APPIMAGE_PLUGIN_SHA256: 49d6a17160675a6bd1781699aae6bdf7692d98552e02a3671d2183d10547842e
+  FLATPAK_CARGO_GENERATOR_URL: https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/9d86d336a39b9af38b86f114b6ce5820fe260f91/cargo/flatpak-cargo-generator.py
+  FLATPAK_CARGO_GENERATOR_SHA256: 0a2db6be87d75910facef28ab46d4d6460802e8419ab850d0caa6a364d26b380
 
 jobs:
   appimage:
@@ -54,17 +56,41 @@ jobs:
           name: appimage
           path: dist/*
 
+  flatpak:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install flatpak tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+      - name: Fetch the cargo source generator
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/flatpak-cargo-generator.py" "$FLATPAK_CARGO_GENERATOR_URL"
+          echo "$FLATPAK_CARGO_GENERATOR_SHA256  $RUNNER_TEMP/flatpak-cargo-generator.py" | sha256sum -c -
+      - name: Build the Flatpak
+        run: |
+          version=""
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then version="${GITHUB_REF_NAME#v}"; fi
+          FLATPAK_CARGO_GENERATOR="$RUNNER_TEMP/flatpak-cargo-generator.py" packaging/build-flatpak.sh "$version"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flatpak
+          path: dist/*
+
   publish:
     if: github.ref_type == 'tag'
-    needs: appimage
+    needs: [appimage, flatpak]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: appimage
           path: dist
+          merge-multiple: true
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}

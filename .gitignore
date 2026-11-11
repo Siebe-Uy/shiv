@@ -22,3 +22,4 @@ docs/superpowers/
 *.swp
 .DS_Store
 Thumbs.db
+packaging/flatpak/cargo-sources.json

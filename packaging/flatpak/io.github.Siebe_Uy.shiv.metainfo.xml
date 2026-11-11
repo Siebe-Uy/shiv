@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.Siebe_Uy.shiv</id>
+  <name>Shiv</name>
+  <summary>Lean, fast mod manager for Deadlock</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-only</project_license>
+  <developer id="io.github.siebe-uy">
+    <name>Siebe</name>
+  </developer>
+  <description>
+    <p>Shiv is a small, native mod manager for Deadlock. It has no webview, so it stays light on memory and scrolls smoothly.</p>
+    <p>Browse the Deadlock Mods catalog, install and order mods, manage profiles and launch the game through Steam.</p>
+  </description>
+  <launchable type="desktop-id">io.github.Siebe_Uy.shiv.desktop</launchable>
+  <url type="homepage">https://github.com/Siebe-Uy/shiv</url>
+  <url type="bugtracker">https://github.com/Siebe-Uy/shiv/issues</url>
+  <categories>
+    <category>Game</category>
+    <category>Utility</category>
+  </categories>
+  <content_rating type="oars-1.1"/>
+  <provides>
+    <binary>shiv</binary>
+  </provides>
+  <releases>
+    <release version="0.1.0" date="2026-11-11"/>
+  </releases>
+</component>
