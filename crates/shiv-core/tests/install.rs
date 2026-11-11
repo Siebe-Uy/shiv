@@ -323,7 +323,7 @@ fn uninstall_removes_vpks_chunks_and_sidecar() {
         .iter()
         .find(|m| m.sidecar.as_ref().is_some_and(|s| s.mod_id == "m1"))
         .unwrap();
-    install::uninstall(m).unwrap();
+    install::uninstall_with(m, || false).unwrap();
     assert_eq!(names(&e.paths.addons), vec!["pak09_dir.vpk"]);
     assert_eq!(sidecar::read(&e.paths.addons, "m1").unwrap(), None);
 
@@ -331,7 +331,7 @@ fn uninstall_removes_vpks_chunks_and_sidecar() {
     let mods = sidecar::group(&e.paths.addons);
     assert_eq!(mods.len(), 1);
     assert!(mods[0].sidecar.is_none());
-    install::uninstall(&mods[0]).unwrap();
+    install::uninstall_with(&mods[0], || false).unwrap();
     assert!(names(&e.paths.addons).is_empty());
 }
 
