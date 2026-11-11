@@ -2,7 +2,9 @@
 #
 # Prebuilt Shiv: unpacks the release AppImage and installs the binary, desktop
 # entry and icon the normal way, so no FUSE is needed to run it.
-# After a new release: bump pkgver, then run `updpkgsums` and `makepkg --printsrcinfo > .SRCINFO`.
+# The 'SKIP' sums below are placeholders until a release exists. Never publish them:
+# after each release set the AppImage sum from the release's published .sha256 file
+# (see README.md in this folder), and the LICENSE sum from `sha256sum LICENSE` at that tag.
 pkgname=shiv-bin
 pkgver=0.1.0
 pkgrel=1
