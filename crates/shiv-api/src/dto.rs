@@ -117,6 +117,16 @@ impl ModDto {
         })
     }
 
+    /// The mod's file version: the date its files changed, else its GameBanana
+    /// update date. Shiv records this in the sidecar at install time and
+    /// compares it with the catalog to spot updates. Empty strings count as missing.
+    pub fn version(&self) -> Option<&str> {
+        fn non_empty(s: &Option<String>) -> Option<&str> {
+            s.as_deref().filter(|s| !s.is_empty())
+        }
+        non_empty(&self.files_updated_at).or_else(|| non_empty(&self.remote_updated_at))
+    }
+
     /// When the mod last changed: the GameBanana update date, else the date
     /// its files changed. Empty strings count as missing.
     pub fn last_updated(&self) -> Option<&str> {

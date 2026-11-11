@@ -73,6 +73,18 @@ pub(crate) struct Entry {
     pub thumb_url: Option<String>,
     /// What the sidecar records about NSFW; `None` when it predates the flag.
     pub nsfw: Option<bool>,
+    /// The file version recorded at install time.
+    pub version: Option<String>,
+}
+
+/// Whether the catalog's file version is newer than the installed one. Both
+/// are ISO-8601 timestamps, which sort correctly as text; a missing or empty
+/// side means unknown, never an update.
+pub(crate) fn update_available(installed: Option<&str>, catalog: Option<&str>) -> bool {
+    match (installed, catalog) {
+        (Some(i), Some(c)) => !i.is_empty() && !c.is_empty() && c > i,
+        _ => false,
+    }
 }
 
 /// Whether a row's thumbnail counts as NSFW, from the sidecar's flag and the
@@ -116,6 +128,7 @@ fn entry(m: &InstalledMod) -> Entry {
             enabled,
             thumb_url: None,
             nsfw: None,
+            version: None,
         };
     };
     let mut parts: Vec<String> = Vec::new();
@@ -150,6 +163,7 @@ fn entry(m: &InstalledMod) -> Entry {
         enabled,
         thumb_url: s.thumbnail_url.clone().filter(|u| !u.is_empty()),
         nsfw: s.nsfw,
+        version: s.version.clone(),
     }
 }
 
@@ -280,6 +294,7 @@ pub(crate) fn attach_with(app: &App, cache: Arc<thumbs::Cache>, deps: Deps) {
     state.on_refresh(|| with_installed(|i| i.refresh(true)));
     state.on_toggle(|id| with_installed(|i| i.toggle(id.as_str())));
     state.on_uninstall(|id| with_installed(|i| i.act(id.as_str(), Action::Uninstall)));
+    state.on_update(|id| crate::browse::update_mod(id.as_str()));
     state.on_open_detail(|id| {
         with_installed(|i| {
             if !crate::browse::show_detail_from(id.as_str(), 1) {
@@ -301,6 +316,28 @@ pub(crate) fn attach_with(app: &App, cache: Arc<thumbs::Cache>, deps: Deps) {
     state.on_dismiss_banner(|| {
         with_installed(|i| i.with_state(|s| s.set_banner_text("".into())));
     });
+}
+
+/// Switch the installed mod `id` on (after the conflict dialog allowed it).
+pub(crate) fn enable(id: &str) {
+    with_installed(|i| i.act(id, Action::Toggle { enable: true }));
+}
+
+/// A download or install of `id` moved on: redraw just that row.
+pub(crate) fn transfer_changed(id: &str) {
+    with_installed(|i| {
+        let entries = i.entries.borrow();
+        let pos = entries.iter().position(|e| e.id == id);
+        if let Some(pos) = pos.filter(|p| *p < i.rows.row_count()) {
+            i.rows.set_row_data(pos, i.build_row(&entries[pos]));
+        }
+    });
+}
+
+/// Re-read the list after something outside the screen changed the addons
+/// folder (an update or a swap finished).
+pub(crate) fn reload() {
+    with_installed(|i| i.refresh(false));
 }
 
 /// The Show NSFW switch flipped or the catalog loaded: re-blur or unblur
@@ -343,6 +380,24 @@ impl Installed {
             managed: e.managed,
             ..InstalledRow::default()
         };
+        if let Some((progress, installing)) = crate::downloads::transfer(&e.id) {
+            row.transferring = true;
+            row.progress = progress;
+            row.transfer_text = match (installing, progress) {
+                (true, _) => "Installing".into(),
+                (false, p) if p < 0.0 => "Downloading".into(),
+                (false, p) => format!("Downloading {}%", (p * 100.0).round() as u32).into(),
+            };
+        }
+        if e.managed
+            && update_available(
+                e.version.as_deref(),
+                crate::browse::catalog_version(&e.id).as_deref(),
+            )
+        {
+            row.update = true;
+            row.tag = "Update available".into();
+        }
         if let Some(img) = e.thumb_url.as_deref().and_then(|u| self.cache.get(u)) {
             let nsfw = is_nsfw(e.nsfw, crate::browse::catalog_nsfw(&e.id));
             let shown = if nsfw && !crate::browse::show_nsfw() {
@@ -482,10 +537,22 @@ impl Installed {
     }
 
     fn toggle(&self, id: &str) {
-        let enable = match self.entries.borrow().iter().find(|e| e.id == id) {
-            Some(e) => !e.enabled,
+        let (enable, name) = match self.entries.borrow().iter().find(|e| e.id == id) {
+            Some(e) => (!e.enabled, e.name.clone()),
             None => return,
         };
+        if enable {
+            // Switching on a mod another enabled mod already replaces: ask first.
+            let with = shiv_core::sidecar::conflicts_with(
+                &self.mods.borrow(),
+                id,
+                crate::browse::catalog_kind,
+            );
+            if !with.is_empty() {
+                crate::conflict::offer(&self.weak, name, with, Some(id.to_owned()));
+                return;
+            }
+        }
         self.act(id, Action::Toggle { enable });
     }
 
@@ -567,7 +634,22 @@ mod tests {
             thumbnail_url: Some("https://x.test/t.png".into()),
             vpks: Vec::new(),
             nsfw: None,
+            hero: None,
+            category: None,
         }
+    }
+
+    #[test]
+    fn update_needs_a_newer_catalog_version() {
+        let old = Some("2026-11-01T10:00:00.000Z");
+        let new = Some("2026-11-08T10:00:00.000Z");
+        assert!(update_available(old, new));
+        assert!(!update_available(new, new));
+        assert!(!update_available(new, old), "catalog older");
+        assert!(!update_available(None, new), "unknown installed version");
+        assert!(!update_available(old, None), "mod not in the catalog");
+        assert!(!update_available(Some(""), new));
+        assert!(!update_available(old, Some("")));
     }
 
     #[test]

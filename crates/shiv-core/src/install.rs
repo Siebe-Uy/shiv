@@ -73,6 +73,8 @@ pub struct ModMeta {
     pub thumbnail_url: Option<String>,
     /// Marked NSFW in the catalog (recorded in the sidecar).
     pub nsfw: bool,
+    pub hero: Option<String>,
+    pub category: Option<String>,
 }
 
 /// Extraction limits; injectable so tests do not need huge archives.
@@ -170,6 +172,8 @@ pub fn install_with_limits(
         thumbnail_url: meta.thumbnail_url,
         vpks: new_names,
         nsfw: Some(meta.nsfw),
+        hero: meta.hero,
+        category: meta.category,
     };
     if let Err(e) = sidecar::write(addons_dir, &new_sidecar) {
         rollback(&moved);

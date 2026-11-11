@@ -35,6 +35,8 @@ fn meta(id: &str) -> ModMeta {
         version: Some("1.0".into()),
         thumbnail_url: None,
         nsfw: false,
+        hero: None,
+        category: None,
     }
 }
 
@@ -585,6 +587,8 @@ fn sidecar_with_traversal_vpk_name_deletes_nothing_outside_addons() {
             abs.to_string_lossy().into_owned(),
         ],
         nsfw: None,
+        hero: None,
+        category: None,
     };
     fs::write(e.paths.addons.join("pak01_dir.vpk"), b"x").unwrap();
     sidecar::write(&e.paths.addons, &evil).unwrap();

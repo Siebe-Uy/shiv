@@ -530,6 +530,8 @@ struct Entry {
     version: Option<String>,
     downloadable: bool,
     nsfw: bool,
+    hero: Option<String>,
+    category: Option<String>,
 }
 
 impl Entry {
@@ -556,9 +558,11 @@ impl Entry {
             .unwrap_or_default();
         Entry {
             thumb_url: thumb_url(&m),
-            version: m.files_updated_at.or(m.remote_updated_at),
+            version: m.version().map(str::to_owned),
             downloadable: m.downloadable,
             nsfw: m.is_nsfw,
+            hero: m.hero.filter(|h| !h.trim().is_empty()),
+            category: m.category.clone().filter(|c| !c.trim().is_empty()),
             byline: byline.into(),
             stats: stats.into(),
             updated: updated.into(),
@@ -788,6 +792,11 @@ struct InstallTask {
     version: Option<String>,
     thumbnail_url: Option<String>,
     nsfw: bool,
+    hero: Option<String>,
+    category: Option<String>,
+    /// Catalog `(hero, category)` by mod id: stands in for mods installed
+    /// before their sidecar recorded these.
+    kinds: HashMap<String, (Option<String>, Option<String>)>,
 }
 
 enum Update {
@@ -798,6 +807,12 @@ enum Update {
         total: Option<u64>,
     },
     Installing,
+    /// A fresh install replaces the same hero's thing as these enabled mods
+    /// (`(mod id, name)`); the user is asked what to do about them.
+    Conflicts {
+        new_name: String,
+        with: Vec<(String, String)>,
+    },
     Done(Result<(), Failure>),
 }
 
@@ -808,7 +823,7 @@ enum Failure {
 
 fn run_install(
     client: &Client,
-    task: InstallTask,
+    mut task: InstallTask,
     cancel: &AtomicBool,
     mut post: impl FnMut(Update),
 ) -> Result<(), Failure> {
@@ -862,14 +877,31 @@ fn run_install(
     if cancel.load(Ordering::Relaxed) {
         return Err(Failure::Cancelled);
     }
+    // Only a first install asks about conflicts: an update of a mod the user
+    // already chose to keep next to another must not ask again.
+    let fresh = matches!(sidecar::read(&paths.addons, &task.mod_id), Ok(None));
+    let kinds = std::mem::take(&mut task.kinds);
+    let (mod_id, name) = (task.mod_id.clone(), task.name.clone());
     let meta = ModMeta {
         mod_id: task.mod_id,
         name: task.name,
         version: task.version,
         thumbnail_url: task.thumbnail_url,
         nsfw: task.nsfw,
+        hero: task.hero,
+        category: task.category,
     };
     install::install(&dest, meta, &paths).map_err(|e| msg(install_error_text(&e)))?;
+    if fresh {
+        let mods = sidecar::group(&paths.addons);
+        let with = sidecar::conflicts_with(&mods, &mod_id, |id| kinds.get(id).cloned());
+        if !with.is_empty() {
+            post(Update::Conflicts {
+                new_name: name,
+                with,
+            });
+        }
+    }
     Ok(())
 }
 
@@ -898,6 +930,40 @@ pub(crate) fn catalog_nsfw(id: &str) -> Option<bool> {
     let mut out = None;
     with_browse(|b| out = b.nsfw_ids.borrow().as_ref().map(|ids| ids.contains(id)));
     out
+}
+
+/// The catalog's current file version of `id`; `None` when no catalog has
+/// loaded or it does not list the mod.
+pub(crate) fn catalog_version(id: &str) -> Option<String> {
+    let mut out = None;
+    with_browse(|b| {
+        out = b
+            .catalog
+            .borrow()
+            .iter()
+            .find(|m| m.id == id)
+            .and_then(|m| m.version().map(str::to_owned));
+    });
+    out
+}
+
+/// The catalog's `(hero, category)` of `id`.
+pub(crate) fn catalog_kind(id: &str) -> Option<(Option<String>, Option<String>)> {
+    let mut out = None;
+    with_browse(|b| {
+        out = b
+            .catalog
+            .borrow()
+            .iter()
+            .find(|m| m.id == id)
+            .map(|m| (m.hero.clone(), m.category.clone()));
+    });
+    out
+}
+
+/// Start an update of an installed mod (the Installed screen's Update button).
+pub(crate) fn update_mod(id: &str) {
+    with_browse(|b| b.install(id));
 }
 
 /// Cancel a running install (from the Downloads screen).
@@ -1339,6 +1405,18 @@ impl Browse {
         self.refresh();
     }
 
+    /// The mod's entry from the list or detail page, else from the catalog:
+    /// the filtered list may not hold it (an update started from Installed).
+    fn entry_for(&self, id: &str) -> Option<Entry> {
+        self.list.find(id).or_else(|| {
+            let catalog = self.catalog.borrow().clone();
+            catalog
+                .iter()
+                .find(|m| m.id == id)
+                .map(|m| Entry::from_dto(m.clone()))
+        })
+    }
+
     fn busy(&self, id: &str) -> bool {
         self.list.jobs.borrow().contains_key(id)
             || self.list.in_flight.borrow().contains_key(id)
@@ -1352,7 +1430,7 @@ impl Browse {
         if self.busy(id) || self.picker.borrow().is_some() {
             return;
         }
-        let Some(entry) = self.list.find(id) else {
+        let Some(entry) = self.entry_for(id) else {
             return;
         };
         let generation = self.next_job.get() + 1;
@@ -1453,8 +1531,8 @@ impl Browse {
         if self.busy(id) {
             return;
         }
-        let Some(entry) = self.list.find(id) else {
-            // The catalog was reloaded or filtered meanwhile.
+        let Some(entry) = self.entry_for(id) else {
+            // The catalog was reloaded meanwhile.
             self.set_banner(
                 "Could not install: that mod is no longer in the list. Find it again and retry.",
             );
@@ -1490,6 +1568,15 @@ impl Browse {
             version: entry.version,
             thumbnail_url: entry.thumb_url,
             nsfw: entry.nsfw,
+            hero: entry.hero,
+            category: entry.category,
+            kinds: self
+                .catalog
+                .borrow()
+                .iter()
+                .filter(|m| m.hero.is_some())
+                .map(|m| (m.id.clone(), (m.hero.clone(), m.category.clone())))
+                .collect(),
         };
         let client = self.client.clone();
         let weak = self.weak.clone();
@@ -1540,6 +1627,11 @@ impl Browse {
     }
 
     fn job_update(&self, id: &str, generation: u64, update: Update) {
+        if let Update::Conflicts { new_name, with } = update {
+            // The mod is on disk whether or not the job is still current.
+            crate::conflict::offer(&self.weak, new_name, with, None);
+            return;
+        }
         if let Update::Done(result) = &update {
             // The disk may have changed: keep the Launch sidebar count current.
             crate::launch::refresh();
@@ -1549,6 +1641,8 @@ impl Browse {
             }
             // A finished install is a fact about the disk even if the job was cancelled late.
             if result.is_ok() {
+                // An update replaces files under the Installed screen.
+                crate::installed::reload();
                 self.list.installed.borrow_mut().insert(id.to_owned());
                 self.list.installed_since.borrow_mut().insert(id.to_owned());
             }
@@ -1575,6 +1669,7 @@ impl Browse {
                     crate::downloads::progress(id, done, total);
                 }
             }
+            Update::Conflicts { .. } => {}
             Update::Installing => {
                 if let Some(job) = self.list.jobs.borrow_mut().get_mut(id) {
                     job.phase = Phase::Installing;

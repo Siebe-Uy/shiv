@@ -90,6 +90,25 @@ pub(crate) fn finished(id: &str, outcome: Outcome) {
     });
 }
 
+/// A running transfer of `id`: its progress (negative when the size is
+/// unknown) and whether it has reached the install step. `None` otherwise.
+pub(crate) fn transfer(id: &str) -> Option<(f32, bool)> {
+    let mut out = None;
+    with_downloads(|d| {
+        out = d
+            .items
+            .borrow()
+            .iter()
+            .find(|i| i.id == id)
+            .and_then(|i| match i.phase {
+                DownloadPhase::Downloading => Some((i.progress, false)),
+                DownloadPhase::Installing => Some((1.0, true)),
+                _ => None,
+            });
+    });
+    out
+}
+
 pub(crate) enum Outcome {
     Done,
     Cancelled,
@@ -133,6 +152,7 @@ impl Downloads {
             );
         }
         self.sync();
+        crate::installed::transfer_changed(id);
     }
 
     fn progress(&self, id: &str, done: u64, total: Option<u64>, now: Instant) {
@@ -163,6 +183,7 @@ impl Downloads {
             item.detail = progress_text(done, item.total, item.speed);
         }
         self.sync();
+        crate::installed::transfer_changed(id);
     }
 
     fn set_phase(&self, id: &str, phase: DownloadPhase, detail: String) {
@@ -199,6 +220,7 @@ impl Downloads {
             });
         }
         self.sync();
+        crate::installed::transfer_changed(id);
     }
 
     fn clear_finished(&self) {

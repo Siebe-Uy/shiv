@@ -2,7 +2,7 @@
 
 import { ListView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { Button, TextButton, Switch } from "widgets.slint";
+import { Button, TextButton, Switch, ProgressBar } from "widgets.slint";
 import { LoadState, CenteredMessage } from "browse.slint";
 
 export struct InstalledRow {
@@ -15,6 +15,13 @@ export struct InstalledRow {
     has-thumb: bool,
     enabled: bool,
     managed: bool,
+    // The catalog has a newer version than the installed one.
+    update: bool,
+    // An install or update of this mod is downloading or installing.
+    transferring: bool,
+    // 0..1, negative when the size is unknown.
+    progress: float,
+    transfer-text: string,
 }
 
 export global InstalledState {
@@ -35,6 +42,8 @@ export global InstalledState {
     callback refresh();
     callback toggle(string);
     callback uninstall(string);
+    // Download and install the mod's newer version.
+    callback update(string);
     callback dismiss-banner();
     // Show the Repair screen.
     callback open-repair();
@@ -45,6 +54,8 @@ export global InstalledState {
 component InstalledRowView inherits Rectangle {
     in property <InstalledRow> item;
     in property <bool> locked;
+    // Files are being replaced: no toggling or uninstalling meanwhile.
+    property <bool> frozen: root.locked || root.item.transferring;
 
     height: 90px + 2 * Theme.s1 + 1px;
     background: hover-area.has-hover ? Theme.raised : transparent;
@@ -123,15 +134,34 @@ component InstalledRowView inherits Rectangle {
                 Switch {
                     label: "Enable " + root.item.name;
                     checked: root.item.enabled;
-                    disabled: root.locked;
+                    disabled: root.frozen;
                     toggled => { InstalledState.toggle(root.item.id); }
                 }
             }
             if InstalledState.confirm-id != root.item.id: HorizontalLayout {
                 alignment: end;
+                spacing: Theme.s1;
+                if root.item.transferring: VerticalLayout {
+                    alignment: center;
+                    spacing: 2px;
+                    horizontal-stretch: 1;
+                    ProgressBar { progress: root.item.progress; }
+                    Text {
+                        text: root.item.transfer-text;
+                        color: Theme.text-muted;
+                        font-size: Theme.text-sm;
+                        overflow: elide;
+                    }
+                }
+                if root.item.update && !root.item.transferring: Button {
+                    text: "Update";
+                    primary: true;
+                    disabled: root.frozen;
+                    clicked => { InstalledState.update(root.item.id); }
+                }
                 TextButton {
                     text: "Uninstall";
-                    disabled: root.locked;
+                    disabled: root.frozen;
                     clicked => { InstalledState.confirm-id = root.item.id; }
                 }
             }
@@ -152,7 +182,7 @@ component InstalledRowView inherits Rectangle {
                 Button {
                     text: "Delete";
                     danger: true;
-                    disabled: root.locked;
+                    disabled: root.frozen;
                     clicked => {
                         InstalledState.uninstall(root.item.id);
                     }
@@ -300,6 +330,96 @@ export component InstalledPage inherits Rectangle {
                 for row in InstalledState.rows: InstalledRowView {
                     item: row;
                     locked: InstalledState.game-running || InstalledState.busy;
+                }
+            }
+        }
+    }
+}
+
+export global ConflictState {
+    in-out property <bool> open;
+    in property <string> new-name;
+    // Comma-separated names of the enabled mods the new one conflicts with.
+    in property <string> old-names;
+    in property <string> error-text;
+    in property <bool> busy;
+    // The dialog came from switching an installed mod on (nothing has changed
+    // yet, so it can be cancelled); otherwise from an install that finished.
+    in property <bool> enabling;
+
+    callback keep-both();
+    callback swap();
+    callback cancel();
+}
+
+// Modal over the whole window: a new mod replaces the same hero's content as
+// mods that are already enabled.
+export component ConflictDialog inherits Rectangle {
+    background: Theme.bg-sunken.with-alpha(0.75);
+
+    // Swallow clicks on the scrim.
+    TouchArea { }
+
+    card := Rectangle {
+        width: min(520px, root.width - 2 * Theme.s4);
+        height: min(body.preferred-height, root.height - 2 * Theme.s4);
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        background: Theme.raised;
+        border-radius: Theme.radius-md;
+        border-width: 1px;
+        border-color: Theme.border;
+
+        // The card itself must not pass clicks to the scrim below.
+        TouchArea { }
+
+        body := VerticalLayout {
+            padding: Theme.s3;
+            spacing: Theme.s2;
+
+            Text {
+                text: "Another mod for the same hero";
+                color: Theme.text;
+                font-size: Theme.text-xl;
+                font-weight: 600;
+                wrap: word-wrap;
+            }
+            Text {
+                text: ConflictState.new-name + (ConflictState.enabling ? " would change" : " changes") + " the same thing as " + ConflictState.old-names + ", which is already enabled. Only one of them can win in game.";
+                color: Theme.text-muted;
+                font-size: Theme.text-md;
+                wrap: word-wrap;
+            }
+            Text {
+                text: ConflictState.enabling ? "Swapping switches the other mod off and this one on. Nothing is deleted." : "Swapping switches the old mod off. Its files stay, so you can turn it back on from Installed.";
+                color: Theme.text-muted;
+                font-size: Theme.text-md;
+                wrap: word-wrap;
+            }
+            if ConflictState.error-text != "": Text {
+                text: ConflictState.error-text;
+                color: Theme.danger;
+                font-size: Theme.text-md;
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
+                spacing: Theme.s1;
+                alignment: end;
+                if ConflictState.enabling: TextButton {
+                    text: "Cancel";
+                    disabled: ConflictState.busy;
+                    clicked => { ConflictState.cancel(); }
+                }
+                Button {
+                    text: "Enable both";
+                    disabled: ConflictState.busy;
+                    clicked => { ConflictState.keep-both(); }
+                }
+                Button {
+                    text: ConflictState.enabling ? "Swap" : "Swap for the new one";
+                    primary: true;
+                    disabled: ConflictState.busy;
+                    clicked => { ConflictState.swap(); }
                 }
             }
         }

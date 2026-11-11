@@ -48,12 +48,84 @@ pub struct Sidecar {
     /// written when `None`, so older Shiv builds read new sidecars too.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nsfw: Option<bool>,
+    /// The hero the catalog lists the mod for, when it was installed. Together
+    /// with `category` it tells which mods replace the same thing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hero: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstalledMod {
     pub sidecar: Option<Sidecar>,
     pub vpks: Vec<InstalledVpk>,
+}
+
+impl InstalledMod {
+    /// Whether the mod counts as switched on: it has VPKs and all are enabled.
+    pub fn is_enabled(&self) -> bool {
+        !self.vpks.is_empty() && self.vpks.iter().all(|v| v.enabled)
+    }
+}
+
+/// Enabled mods, other than `mod_id`, that the catalog lists for the same hero
+/// and category: they replace the same thing, so only one can win in game.
+/// Mods without a recorded hero (hand-added, or installed before it was
+/// recorded) never count.
+pub fn conflicts<'a>(
+    mods: &'a [InstalledMod],
+    mod_id: &str,
+    hero: &str,
+    category: Option<&str>,
+) -> Vec<&'a Sidecar> {
+    mods.iter()
+        .filter(|m| m.is_enabled())
+        .filter_map(|m| m.sidecar.as_ref())
+        .filter(|s| {
+            s.mod_id != mod_id
+                && s.hero.as_deref() == Some(hero)
+                && s.category.as_deref() == category
+        })
+        .collect()
+}
+
+/// `(mod id, display name)` of the enabled mods that conflict with `mod_id`.
+/// `kind_of` supplies a mod's `(hero, category)` when its sidecar records none
+/// (installed before they were recorded), usually from the catalog.
+pub fn conflicts_with(
+    mods: &[InstalledMod],
+    mod_id: &str,
+    kind_of: impl Fn(&str) -> Option<(Option<String>, Option<String>)>,
+) -> Vec<(String, String)> {
+    let mut mods = mods.to_vec();
+    for s in mods.iter_mut().filter_map(|m| m.sidecar.as_mut()) {
+        if let (None, Some((hero, category))) = (&s.hero, kind_of(&s.mod_id)) {
+            s.hero = hero;
+            s.category = category;
+        }
+    }
+    let Some(me) = mods
+        .iter()
+        .filter_map(|m| m.sidecar.as_ref())
+        .find(|s| s.mod_id == mod_id)
+    else {
+        return Vec::new();
+    };
+    let Some(hero) = me.hero.as_deref() else {
+        return Vec::new();
+    };
+    conflicts(&mods, mod_id, hero, me.category.as_deref())
+        .into_iter()
+        .map(|s| {
+            let label = if s.name.is_empty() {
+                &s.mod_id
+            } else {
+                &s.name
+            };
+            (s.mod_id.clone(), label.clone())
+        })
+        .collect()
 }
 
 fn validate(mod_id: &str) -> Result<(), SidecarError> {

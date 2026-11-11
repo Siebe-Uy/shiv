@@ -8,6 +8,7 @@ slint::include_modules!();
 use shiv_core::game::{self, GameError, GamePaths};
 
 mod browse;
+mod conflict;
 mod crosshair;
 mod describe;
 mod detail_tabs;
@@ -116,6 +117,7 @@ fn run() -> Result<(), slint::PlatformError> {
     let api_url = std::env::var("SHIV_API_URL").unwrap_or_else(|_| DEFAULT_API_URL.to_owned());
     let cache = browse::attach(&app, &api_url);
     installed::attach(&app, cache);
+    conflict::attach(&app);
     launch::attach(&app);
     repair::attach(&app);
     crosshair::attach(&app);
@@ -328,6 +330,8 @@ mod tests {
                 thumbnail_url: None,
                 vpks: vec!["pak01_dir.vpk".into()],
                 nsfw: None,
+                hero: None,
+                category: None,
             },
         )
         .unwrap();
@@ -1390,6 +1394,8 @@ mod tests {
                 thumbnail_url: None,
                 vpks: vec!["pak01_dir.vpk".into()],
                 nsfw: None,
+                hero: None,
+                category: None,
             },
         )
         .expect("sidecar");
@@ -2178,6 +2184,8 @@ mod tests {
                     thumbnail_url: Some(thumb.clone()),
                     vpks: vec![vpk],
                     nsfw,
+                    hero: None,
+                    category: None,
                 },
             )
             .expect("sidecar");

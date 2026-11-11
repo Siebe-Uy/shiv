@@ -1258,6 +1258,8 @@ mod tests {
                 thumbnail_url: None,
                 vpks: vec!["pak01_dir.vpk".into()],
                 nsfw: None,
+                hero: None,
+                category: None,
             },
         )
         .unwrap();

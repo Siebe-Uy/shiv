@@ -10,6 +10,8 @@ fn sc(id: &str, vpks: &[&str]) -> Sidecar {
         thumbnail_url: None,
         vpks: vpks.iter().map(|s| s.to_string()).collect(),
         nsfw: None,
+        hero: None,
+        category: None,
     }
 }
 
@@ -131,4 +133,70 @@ fn group_does_not_show_chunks_as_mods() {
     assert_eq!(g.len(), 1);
     assert_eq!(g[0].sidecar.as_ref().unwrap().mod_id, "m1");
     assert_eq!(g[0].vpks[0].chunks.len(), 2);
+}
+
+fn installed(
+    id: &str,
+    hero: Option<&str>,
+    category: Option<&str>,
+    enabled: bool,
+) -> shiv_core::sidecar::InstalledMod {
+    let mut s = sc(id, &["pak01_dir.vpk"]);
+    s.hero = hero.map(Into::into);
+    s.category = category.map(Into::into);
+    shiv_core::sidecar::InstalledMod {
+        sidecar: Some(s),
+        vpks: vec![shiv_core::addons::InstalledVpk {
+            file: format!("/a/pak01_dir.vpk{}", if enabled { "" } else { ".disabled" }).into(),
+            pak: Some(1),
+            enabled,
+            chunks: Vec::new(),
+        }],
+    }
+}
+
+#[test]
+fn conflicts_are_enabled_mods_for_the_same_hero_and_category() {
+    let mods = vec![
+        installed("same", Some("Haze"), Some("Skins"), true),
+        installed("off", Some("Haze"), Some("Skins"), false),
+        installed("other-hero", Some("Seven"), Some("Skins"), true),
+        installed("other-kind", Some("Haze"), Some("Audio"), true),
+        installed("unknown", None, None, true),
+        installed("me", Some("Haze"), Some("Skins"), true),
+    ];
+    let ids: Vec<&str> = sidecar::conflicts(&mods, "me", "Haze", Some("Skins"))
+        .iter()
+        .map(|s| s.mod_id.as_str())
+        .collect();
+    assert_eq!(ids, ["same"]);
+}
+
+#[test]
+fn conflicts_with_falls_back_to_the_catalog_for_old_sidecars() {
+    let mods = vec![
+        installed("old", None, None, true),
+        installed("new", Some("Bebop"), Some("Skins"), true),
+    ];
+    let kind =
+        |id: &str| (id == "old").then(|| (Some("Bebop".to_string()), Some("Skins".to_string())));
+    assert_eq!(
+        sidecar::conflicts_with(&mods, "new", kind),
+        [("old".to_string(), "Mod old".to_string())]
+    );
+    assert!(sidecar::conflicts_with(&mods, "new", |_| None).is_empty());
+}
+
+#[test]
+fn hero_and_category_roundtrip_and_stay_out_of_old_sidecars() {
+    let d = tempdir().unwrap();
+    let mut s = sc("h1", &["pak01_dir.vpk"]);
+    s.hero = Some("Haze".into());
+    s.category = Some("Skins".into());
+    sidecar::write(d.path(), &s).unwrap();
+    assert_eq!(sidecar::read(d.path(), "h1").unwrap(), Some(s));
+    let plain = sc("h2", &["pak02_dir.vpk"]);
+    sidecar::write(d.path(), &plain).unwrap();
+    let raw = fs::read_to_string(d.path().join(".shiv/h2.json")).unwrap();
+    assert!(!raw.contains("hero") && !raw.contains("category"), "{raw}");
 }
