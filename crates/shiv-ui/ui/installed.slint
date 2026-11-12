@@ -22,6 +22,11 @@ export struct InstalledRow {
     // 0..1, negative when the size is unknown.
     progress: float,
     transfer-text: string,
+    // 1-based place in the load order (1 loads first and wins conflicts);
+    // 0 when the mod cannot be moved.
+    position: int,
+    can-up: bool,
+    can-down: bool,
 }
 
 export global InstalledState {
@@ -41,6 +46,10 @@ export global InstalledState {
 
     callback refresh();
     callback toggle(string);
+    // Move a mod in the load order: 0 up, 1 down, 2 to the very first place.
+    callback move(string, int);
+    // Move a mod to a 1-based place in the load order.
+    callback move-to(string, int);
     callback uninstall(string);
     // Download and install the mod's newer version.
     callback update(string);
@@ -49,6 +58,43 @@ export global InstalledState {
     callback open-repair();
     // Open the mod's catalog detail page (managed mods only).
     callback open-detail(string);
+}
+
+// A small triangle button for moving a mod up or down.
+component ArrowButton inherits Rectangle {
+    in property <bool> up;
+    in property <bool> disabled;
+    in property <string> label;
+    callback clicked;
+
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-action-default => {
+        if (!root.disabled) {
+            root.clicked();
+        }
+    }
+
+    width: 32px;
+    height: 24px;
+    border-radius: Theme.radius;
+    opacity: root.disabled ? 0.3 : 1.0;
+    background: ta.has-hover && !root.disabled ? Theme.hover : transparent;
+
+    Path {
+        width: 12px;
+        height: 7px;
+        viewbox-width: 12;
+        viewbox-height: 7;
+        commands: root.up ? "M 0 7 L 6 0 L 12 7 Z" : "M 0 0 L 12 0 L 6 7 Z";
+        fill: ta.has-hover && !root.disabled ? Theme.text : Theme.text-muted;
+    }
+
+    ta := TouchArea {
+        enabled: !root.disabled;
+        mouse-cursor: root.disabled ? default : pointer;
+        clicked => { root.clicked(); }
+    }
 }
 
 component InstalledRowView inherits Rectangle {
@@ -75,6 +121,55 @@ component InstalledRowView inherits Rectangle {
         padding-left: Theme.s1;
         padding-right: Theme.s2;
         spacing: Theme.s2;
+
+        if root.item.position > 0: VerticalLayout {
+            width: 36px;
+            alignment: center;
+            spacing: 2px;
+            ArrowButton {
+                up: true;
+                label: "Load " + root.item.name + " earlier";
+                disabled: root.frozen || !root.item.can-up;
+                clicked => { InstalledState.move(root.item.id, 0); }
+            }
+            // Type a place and press Enter to jump there.
+            Rectangle {
+                height: 24px;
+                border-radius: Theme.radius;
+                border-width: 1px;
+                border-color: place.has-focus ? Theme.accent : Theme.border;
+                place := TextInput {
+                    text: "" + root.item.position;
+                    input-type: number;
+                    font-size: Theme.text-sm;
+                    color: Theme.text;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    enabled: !root.frozen;
+                    accessible-label: "Load order place of " + root.item.name;
+                    accepted => {
+                        InstalledState.move-to(root.item.id, Math.round(self.text.to-float()));
+                        self.clear-focus();
+                    }
+                    // A moved mod gets a new place; typing breaks the text
+                    // binding, so set it again.
+                    property <int> shown: root.item.position;
+                    changed shown => { self.text = "" + self.shown; }
+                    changed has-focus => {
+                        if (!self.has-focus) {
+                            self.text = "" + root.item.position;
+                        }
+                    }
+                }
+            }
+            ArrowButton {
+                up: false;
+                label: "Load " + root.item.name + " later";
+                disabled: root.frozen || !root.item.can-down;
+                clicked => { InstalledState.move(root.item.id, 1); }
+            }
+        }
+        if root.item.position == 0: Rectangle { width: 44px; }
 
         Rectangle {
             width: 160px;
@@ -254,6 +349,8 @@ export component InstalledPage inherits Rectangle {
             border-color: Theme.accent;
             background: Theme.raised;
             HorizontalLayout {
+                padding-top: Theme.s1;
+                padding-bottom: Theme.s1;
                 padding-left: Theme.s2;
                 padding-right: Theme.s1;
                 spacing: Theme.s2;
@@ -278,6 +375,8 @@ export component InstalledPage inherits Rectangle {
             border-color: Theme.border;
             background: Theme.raised;
             HorizontalLayout {
+                padding-top: Theme.s1;
+                padding-bottom: Theme.s1;
                 padding-left: Theme.s2;
                 padding-right: Theme.s1;
                 spacing: Theme.s2;
@@ -348,6 +447,8 @@ export global ConflictState {
     in property <bool> enabling;
 
     callback keep-both();
+    // Leave both on, with the new mod first in the load order.
+    callback load-first();
     callback swap();
     callback cancel();
 }
@@ -409,6 +510,11 @@ export component ConflictDialog inherits Rectangle {
                     text: "Cancel";
                     disabled: ConflictState.busy;
                     clicked => { ConflictState.cancel(); }
+                }
+                Button {
+                    text: "Both, new first";
+                    disabled: ConflictState.busy;
+                    clicked => { ConflictState.load-first(); }
                 }
                 Button {
                     text: "Enable both";

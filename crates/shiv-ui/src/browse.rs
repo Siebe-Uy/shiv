@@ -1629,7 +1629,7 @@ impl Browse {
     fn job_update(&self, id: &str, generation: u64, update: Update) {
         if let Update::Conflicts { new_name, with } = update {
             // The mod is on disk whether or not the job is still current.
-            crate::conflict::offer(&self.weak, new_name, with, None);
+            crate::conflict::offer(&self.weak, id.to_owned(), new_name, with, None);
             return;
         }
         if let Update::Done(result) = &update {

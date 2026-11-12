@@ -63,6 +63,16 @@ pub struct InstalledMod {
 }
 
 impl InstalledMod {
+    /// The lowest pak number among its VPKs: where it sits in the load order
+    /// (`u32::MAX` when none of them has a pak number).
+    pub fn load_position(&self) -> u32 {
+        self.vpks
+            .iter()
+            .filter_map(|v| v.pak)
+            .min()
+            .unwrap_or(u32::MAX)
+    }
+
     /// Whether the mod counts as switched on: it has VPKs and all are enabled.
     pub fn is_enabled(&self) -> bool {
         !self.vpks.is_empty() && self.vpks.iter().all(|v| v.enabled)
@@ -258,5 +268,93 @@ pub fn group(addons: &Path) -> Vec<InstalledMod> {
         sidecar: None,
         vpks: vec![v],
     }));
+    // Load order: the engine mounts the lowest pak number first. The sort is
+    // stable, so mods without a pak number stay last in the order above.
+    out.sort_by_key(InstalledMod::load_position);
     out
+}
+
+/// Where [`move_mod`] puts a mod in the load order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Move {
+    /// One place earlier.
+    Up,
+    /// One place later.
+    Down,
+    /// The very first place: it wins every conflict.
+    Top,
+    /// A 0-based place among the movable mods; past the last means last.
+    To(usize),
+}
+
+/// Move `mods[index]` in the load order by renumbering paks, and keep the
+/// sidecars pointing at the renamed files. `mods` is a [`group`] result.
+/// Mods without a pak number (hand-added under another name) cannot move and
+/// are not counted. Moving past either end does nothing. If recording the
+/// new names fails, the file renames are undone.
+pub fn move_mod(
+    addons: &Path,
+    mods: &[InstalledMod],
+    index: usize,
+    to: Move,
+) -> Result<(), SidecarError> {
+    let mut order: Vec<&InstalledMod> = mods
+        .iter()
+        .filter(|m| m.load_position() != u32::MAX)
+        .collect();
+    let Some(from) = mods
+        .get(index)
+        .and_then(|m| order.iter().position(|o| std::ptr::eq(*o, m)))
+    else {
+        return Ok(());
+    };
+    let target = match to {
+        Move::Up => from.saturating_sub(1),
+        Move::Down => (from + 1).min(order.len() - 1),
+        Move::Top => 0,
+        Move::To(n) => n.min(order.len() - 1),
+    };
+    if target == from {
+        return Ok(());
+    }
+    let moved = order.remove(from);
+    order.insert(target, moved);
+
+    let flat: Vec<InstalledVpk> = order
+        .iter()
+        .flat_map(|m| {
+            let mut vpks = m.vpks.clone();
+            vpks.sort_by_key(|v| v.pak);
+            vpks
+        })
+        .collect();
+    let plan = addons::plan_reorder(&flat)?;
+    addons::apply_moves(&plan.moves)?;
+
+    let mut written: Vec<&Sidecar> = Vec::new();
+    for s in order.iter().filter_map(|m| m.sidecar.as_ref()) {
+        let mut updated = s.clone();
+        for name in &mut updated.vpks {
+            if let Some((_, new)) = plan.names.iter().find(|(old, _)| old == name) {
+                name.clone_from(new);
+            }
+        }
+        if updated == *s {
+            continue;
+        }
+        if let Err(e) = write(addons, &updated) {
+            for old in written {
+                let _ = write(addons, old);
+            }
+            let undo: Vec<_> = plan
+                .moves
+                .iter()
+                .map(|(f, t)| (t.clone(), f.clone()))
+                .collect();
+            let _ = addons::apply_moves(&undo);
+            return Err(e);
+        }
+        written.push(s);
+    }
+    Ok(())
 }

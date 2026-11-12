@@ -15,7 +15,7 @@ use std::sync::Arc;
 use shiv_core::addons::{self, AddonsError};
 use shiv_core::game::{self, GameError, GamePaths};
 use shiv_core::install::{self, InstallError};
-use shiv_core::sidecar::{self, InstalledMod};
+use shiv_core::sidecar::{self, InstalledMod, Move};
 use shiv_repair::OverlayState;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel, Weak};
 
@@ -75,6 +75,11 @@ pub(crate) struct Entry {
     pub nsfw: Option<bool>,
     /// The file version recorded at install time.
     pub version: Option<String>,
+    /// 1-based place in the load order (1 loads first and wins conflicts);
+    /// 0 for a mod that has no pak number and cannot be moved.
+    pub position: u32,
+    pub can_up: bool,
+    pub can_down: bool,
 }
 
 /// Whether the catalog's file version is newer than the installed one. Both
@@ -129,6 +134,9 @@ fn entry(m: &InstalledMod) -> Entry {
             thumb_url: None,
             nsfw: None,
             version: None,
+            position: 0,
+            can_up: false,
+            can_down: false,
         };
     };
     let mut parts: Vec<String> = Vec::new();
@@ -164,11 +172,32 @@ fn entry(m: &InstalledMod) -> Entry {
         thumb_url: s.thumbnail_url.clone().filter(|u| !u.is_empty()),
         nsfw: s.nsfw,
         version: s.version.clone(),
+        position: 0,
+        can_up: false,
+        can_down: false,
     }
 }
 
+/// Rows for `mods` (a load-ordered `sidecar::group` result), numbering the
+/// ones that can be moved.
 pub(crate) fn entries(mods: &[InstalledMod]) -> Vec<Entry> {
-    mods.iter().map(entry).collect()
+    let movable = mods
+        .iter()
+        .filter(|m| m.load_position() != u32::MAX)
+        .count() as u32;
+    let mut rank = 0;
+    mods.iter()
+        .map(|m| {
+            let mut e = entry(m);
+            if m.load_position() != u32::MAX {
+                rank += 1;
+                e.position = rank;
+                e.can_up = rank > 1;
+                e.can_down = rank < movable;
+            }
+            e
+        })
+        .collect()
 }
 
 fn summary(n: usize) -> String {
@@ -206,6 +235,7 @@ fn load(deps: &Deps) -> Result<Loaded, String> {
 enum Action {
     Toggle { enable: bool },
     Uninstall,
+    Move(Move),
 }
 
 impl Action {
@@ -214,6 +244,7 @@ impl Action {
             Action::Toggle { enable: true } => "enable",
             Action::Toggle { enable: false } => "disable",
             Action::Uninstall => "uninstall",
+            Action::Move(_) => "move",
         }
     }
 }
@@ -229,7 +260,14 @@ fn action_error_text(name: &str, action: Action, detail: &str) -> String {
     format!("Could not {} {name}. {detail}", action.verb())
 }
 
-fn run_action(deps: &Deps, m: &InstalledMod, name: &str, action: Action) -> Result<(), String> {
+fn run_action(
+    deps: &Deps,
+    mods: &[InstalledMod],
+    index: usize,
+    name: &str,
+    action: Action,
+) -> Result<(), String> {
+    let m = &mods[index];
     let fail = |detail: &str| action_error_text(name, action, detail);
     if (deps.running)() {
         return Err(fail(GAME_RUNNING_TEXT));
@@ -241,6 +279,10 @@ fn run_action(deps: &Deps, m: &InstalledMod, name: &str, action: Action) -> Resu
                 addons::set_enabled(vpk, enable).map_err(|e| fail(&addons_error_text(&e)))?;
             }
             Ok(())
+        }
+        Action::Move(to) => {
+            let paths = (deps.locate)().map_err(|e| fail(&game_error_text(&e)))?;
+            sidecar::move_mod(&paths.addons, mods, index, to).map_err(|e| fail(&e.to_string()))
         }
         Action::Uninstall => {
             let running = deps.running.clone();
@@ -294,6 +336,19 @@ pub(crate) fn attach_with(app: &App, cache: Arc<thumbs::Cache>, deps: Deps) {
     state.on_refresh(|| with_installed(|i| i.refresh(true)));
     state.on_toggle(|id| with_installed(|i| i.toggle(id.as_str())));
     state.on_uninstall(|id| with_installed(|i| i.act(id.as_str(), Action::Uninstall)));
+    state.on_move(|id, to| {
+        let to = match to {
+            0 => Move::Up,
+            1 => Move::Down,
+            _ => Move::Top,
+        };
+        with_installed(|i| i.act(id.as_str(), Action::Move(to)));
+    });
+    state.on_move_to(|id, position| {
+        // The row shows 1-based places; 0 or below means first.
+        let to = Move::To((position.max(1) - 1) as usize);
+        with_installed(|i| i.act(id.as_str(), Action::Move(to)));
+    });
     state.on_update(|id| crate::browse::update_mod(id.as_str()));
     state.on_open_detail(|id| {
         with_installed(|i| {
@@ -378,6 +433,9 @@ impl Installed {
             .into(),
             enabled: e.enabled,
             managed: e.managed,
+            position: e.position as i32,
+            can_up: e.can_up,
+            can_down: e.can_down,
             ..InstalledRow::default()
         };
         if let Some((progress, installing)) = crate::downloads::transfer(&e.id) {
@@ -549,7 +607,7 @@ impl Installed {
                 crate::browse::catalog_kind,
             );
             if !with.is_empty() {
-                crate::conflict::offer(&self.weak, name, with, Some(id.to_owned()));
+                crate::conflict::offer(&self.weak, id.to_owned(), name, with, Some(id.to_owned()));
                 return;
             }
         }
@@ -562,15 +620,15 @@ impl Installed {
         }
         let found = {
             let entries = self.entries.borrow();
-            let mods = self.mods.borrow();
             entries
                 .iter()
                 .position(|e| e.id == id)
-                .and_then(|i| Some((mods.get(i)?.clone(), entries[i].name.clone())))
+                .map(|i| (i, entries[i].name.clone()))
         };
-        let Some((m, name)) = found else {
+        let Some((index, name)) = found else {
             return;
         };
+        let mods = self.mods.borrow().clone();
         self.set_flags(None, Some(true));
         // The confirmation is consumed only once the action is accepted.
         self.with_state(|s| s.set_confirm_id(SharedString::new()));
@@ -578,7 +636,7 @@ impl Installed {
         let weak = self.weak.clone();
         let started = crate::spawn_worker(
             "shiv-installed-action",
-            move || run_action(&deps, &m, &name, action),
+            move || run_action(&deps, &mods, index, &name, action),
             move |result| {
                 let result = result.and_then(|r| r);
                 let _ = weak.upgrade_in_event_loop(move |_| {
@@ -713,5 +771,29 @@ mod tests {
         assert!(!e.enabled);
         assert!(e.detail.contains("paks 01, 02"), "{}", e.detail);
         assert!(e.detail.contains("Partly enabled"), "{}", e.detail);
+    }
+
+    #[test]
+    fn rows_number_movable_mods_in_load_order() {
+        let mods = [
+            InstalledMod {
+                sidecar: Some(sidecar("a", "A")),
+                vpks: vec![vpk("pak01_dir.vpk", Some(1), true)],
+            },
+            InstalledMod {
+                sidecar: Some(sidecar("b", "B")),
+                vpks: vec![vpk("pak02_dir.vpk", Some(2), true)],
+            },
+            InstalledMod {
+                sidecar: None,
+                vpks: vec![vpk("hand.vpk", None, true)],
+            },
+        ];
+        let e = entries(&mods);
+        let got: Vec<_> = e
+            .iter()
+            .map(|e| (e.position, e.can_up, e.can_down))
+            .collect();
+        assert_eq!(got, [(1, false, true), (2, true, false), (0, false, false)]);
     }
 }

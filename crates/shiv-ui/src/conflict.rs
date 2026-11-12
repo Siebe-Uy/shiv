@@ -19,6 +19,7 @@ use slint::{ComponentHandle, Weak};
 use crate::{App, ConflictState};
 
 struct Offer {
+    new_id: String,
     new_name: String,
     /// The installed mod waiting to be enabled; `None` after an install,
     /// where the new mod is already on.
@@ -49,18 +50,24 @@ pub(crate) fn attach(app: &App) {
         let weak = weak.clone();
         move || swap(weak.clone())
     });
+    state.on_load_first({
+        let weak = weak.clone();
+        move || load_first(weak.clone())
+    });
     state.on_cancel(move || cancel(&weak));
 }
 
 /// Queue an offer; shown at once when no other is open.
 pub(crate) fn offer(
     weak: &Weak<App>,
+    new_id: String,
     new_name: String,
     with: Vec<(String, String)>,
     enable: Option<String>,
 ) {
     QUEUE.with(|q| {
         q.borrow_mut().offers.push_back(Offer {
+            new_id,
             new_name,
             enable,
             with,
@@ -136,33 +143,55 @@ fn cancel(weak: &Weak<App>) {
 }
 
 fn swap(weak: Weak<App>) {
-    let Some(app) = weak.upgrade() else { return };
-    let (ids, enable): (Vec<String>, Option<String>) = match QUEUE.with(|q| {
+    let Some(offer) = claim_front() else { return };
+    let ids: Vec<String> = offer.with.iter().map(|(id, _)| id.clone()).collect();
+    run(weak, "shiv-conflict-swap", move || {
+        disable(&ids, offer.enable.as_deref())
+    });
+}
+
+/// Leave both mods on and put the new one first in the load order, so it wins.
+fn load_first(weak: Weak<App>) {
+    let Some(offer) = claim_front() else { return };
+    run(weak, "shiv-conflict-first", move || {
+        enable_first(&offer.new_id, offer.enable.is_some())
+    });
+}
+
+/// Take the front offer for a worker; `None` when there is none or another
+/// worker already holds it. Marks the swap as running.
+fn claim_front() -> Option<Offer> {
+    QUEUE.with(|q| {
         let mut q = q.borrow_mut();
         if q.swapping {
             return None;
         }
         let front = q.offers.front()?;
-        let ids = front.with.iter().map(|(id, _)| id.clone()).collect();
-        let enable = front.enable.clone();
+        let claimed = Offer {
+            new_id: front.new_id.clone(),
+            new_name: String::new(),
+            enable: front.enable.clone(),
+            with: front.with.clone(),
+        };
         q.swapping = true;
-        Some((ids, enable))
-    }) {
-        Some(found) => found,
-        None => return,
-    };
+        Some(claimed)
+    })
+}
+
+fn run(
+    weak: Weak<App>,
+    name: &'static str,
+    work: impl FnOnce() -> Result<(), String> + Send + 'static,
+) {
+    let Some(app) = weak.upgrade() else { return };
     let state = app.global::<ConflictState>();
     state.set_busy(true);
     state.set_error_text("".into());
     let done_weak = weak.clone();
-    let started = crate::spawn_worker(
-        "shiv-conflict-swap",
-        move || disable(&ids, enable.as_deref()),
-        move |result| {
-            let result = result.and_then(|r| r);
-            let _ = done_weak.upgrade_in_event_loop(move |app| swapped(&app, result));
-        },
-    );
+    let started = crate::spawn_worker(name, work, move |result| {
+        let result = result.and_then(|r| r);
+        let _ = done_weak.upgrade_in_event_loop(move |app| swapped(&app, result));
+    });
     if !started {
         swapped(&app, Err("Could not start a background thread.".into()));
     }
@@ -214,4 +243,28 @@ fn disable(ids: &[String], enable: Option<&str>) -> Result<(), String> {
         set(id, true)?;
     }
     Ok(())
+}
+
+/// Switch the mod `id` on when `enable`, then move it to the first place.
+fn enable_first(id: &str, enable: bool) -> Result<(), String> {
+    if game::is_running() {
+        return Err("Deadlock is running. Close it to change mods.".into());
+    }
+    let paths = crate::locate_game().map_err(|e| crate::browse::game_error_text(&e))?;
+    let mods = sidecar::group(&paths.addons);
+    let is_it = |m: &sidecar::InstalledMod| m.sidecar.as_ref().is_some_and(|s| s.mod_id == id);
+    if enable {
+        for vpk in mods.iter().filter(|m| is_it(m)).flat_map(|m| &m.vpks) {
+            addons::set_enabled(vpk, true)
+                .map_err(|e| format!("Could not switch the mod on. {e}"))?;
+        }
+    }
+    // Enabling renames files in place, so list again before moving.
+    let mods = sidecar::group(&paths.addons);
+    let index = mods
+        .iter()
+        .position(is_it)
+        .ok_or("The mod is no longer installed.")?;
+    sidecar::move_mod(&paths.addons, &mods, index, sidecar::Move::Top)
+        .map_err(|e| format!("Could not change the load order. {e}"))
 }

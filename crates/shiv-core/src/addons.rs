@@ -201,6 +201,103 @@ pub fn set_enabled(vpk: &InstalledVpk, enabled: bool) -> Result<(), AddonsError>
     Ok(())
 }
 
+/// Rename files in two phases (everything to a temporary name, then to its
+/// target) so moves may swap or chain names. Every source must exist and every
+/// target must be free or itself be moved; renames already done are undone if
+/// a later one fails.
+pub(crate) fn apply_moves(moves: &[(PathBuf, PathBuf)]) -> Result<(), AddonsError> {
+    for (from, to) in moves {
+        if !from.exists() {
+            return Err(AddonsError::Io {
+                path: from.clone(),
+                source: io::Error::from(io::ErrorKind::NotFound),
+            });
+        }
+        if to.exists() && !moves.iter().any(|(f, _)| f == to) {
+            return Err(AddonsError::TargetExists { target: to.clone() });
+        }
+    }
+    let tmp = |p: &Path| {
+        let mut name = p.as_os_str().to_owned();
+        name.push(".reorder");
+        PathBuf::from(name)
+    };
+    let mut done: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut step = |from: PathBuf, to: PathBuf| match fs::rename(&from, &to) {
+        Ok(()) => {
+            done.push((from, to));
+            Ok(())
+        }
+        Err(source) => Err(AddonsError::Io { path: from, source }),
+    };
+    let result = moves
+        .iter()
+        .try_for_each(|(from, _)| step(from.clone(), tmp(from)))
+        .and_then(|()| {
+            moves
+                .iter()
+                .try_for_each(|(from, to)| step(tmp(from), to.clone()))
+        });
+    if result.is_err() {
+        for (from, to) in done.into_iter().rev() {
+            let _ = fs::rename(to, from);
+        }
+    }
+    result
+}
+
+/// The file `vpk` (a dir file or chunk) would have under pak number `number`.
+fn renumbered(file: &Path, number: u32) -> Option<PathBuf> {
+    let name = file.file_name()?.to_str()?;
+    let (stem, _) = split_name(name)?;
+    parse_pak(stem)?;
+    // `pakNN` is always the first five bytes (checked by `parse_pak`).
+    Some(file.with_file_name(format!("pak{number:02}{}", name.get(5..)?)))
+}
+
+/// What [`plan_reorder`] decided: the renames, and `(old, new)` enabled-form
+/// dir file names of every VPK that moves.
+pub(crate) struct ReorderPlan {
+    pub moves: Vec<(PathBuf, PathBuf)>,
+    pub names: Vec<(String, String)>,
+}
+
+fn enabled_name(path: &Path) -> String {
+    let n = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    n.strip_suffix(DISABLED_EXT).unwrap_or(n).to_owned()
+}
+
+/// Plan giving the pak-numbered VPKs in `order` (dir files with their chunks,
+/// enabled or not) the pak numbers they hold now, redistributed in `order`:
+/// the first VPK gets the lowest number and so on. Gaps stay and VPKs whose
+/// number does not change are left alone. VPKs without a pak number are
+/// skipped.
+pub(crate) fn plan_reorder(order: &[InstalledVpk]) -> Result<ReorderPlan, AddonsError> {
+    let ranked: Vec<&InstalledVpk> = order.iter().filter(|v| v.pak.is_some()).collect();
+    let mut numbers: Vec<u32> = ranked.iter().filter_map(|v| v.pak).collect();
+    numbers.sort_unstable();
+    let mut plan = ReorderPlan {
+        moves: Vec::new(),
+        names: Vec::new(),
+    };
+    for (vpk, number) in ranked.into_iter().zip(numbers) {
+        if vpk.pak == Some(number) {
+            continue;
+        }
+        for (i, file) in std::iter::once(&vpk.file).chain(&vpk.chunks).enumerate() {
+            let to = renumbered(file, number).ok_or_else(|| AddonsError::NotAPak(file.clone()))?;
+            if i == 0 {
+                plan.names.push((enabled_name(file), enabled_name(&to)));
+            }
+            plan.moves.push((file.clone(), to));
+        }
+    }
+    Ok(plan)
+}
+
 /// Pak numbers carried by any file in `addons` (dir, chunk, enabled or disabled).
 pub(crate) fn used_pak_numbers(addons: &Path) -> Result<Vec<u32>, AddonsError> {
     let io_err = |source| AddonsError::Io {

@@ -200,3 +200,146 @@ fn hero_and_category_roundtrip_and_stay_out_of_old_sidecars() {
     let raw = fs::read_to_string(d.path().join(".shiv/h2.json")).unwrap();
     assert!(!raw.contains("hero") && !raw.contains("category"), "{raw}");
 }
+
+fn touch(dir: &std::path::Path, names: &[&str]) {
+    for n in names {
+        fs::write(dir.join(n), n.as_bytes()).unwrap();
+    }
+}
+
+fn ids(dir: &std::path::Path) -> Vec<String> {
+    sidecar::group(dir)
+        .iter()
+        .map(|m| {
+            m.sidecar
+                .as_ref()
+                .map_or_else(String::new, |s| s.mod_id.clone())
+        })
+        .collect()
+}
+
+#[test]
+fn group_lists_mods_in_load_order() {
+    let d = tempdir().unwrap();
+    touch(
+        d.path(),
+        &["pak01_dir.vpk", "pak02_dir.vpk", "pak03_dir.vpk.disabled"],
+    );
+    sidecar::write(d.path(), &sc("a", &["pak03_dir.vpk"])).unwrap();
+    sidecar::write(d.path(), &sc("b", &["pak01_dir.vpk"])).unwrap();
+    sidecar::write(d.path(), &sc("c", &["pak02_dir.vpk"])).unwrap();
+    assert_eq!(ids(d.path()), ["b", "c", "a"]);
+}
+
+#[test]
+fn move_top_renumbers_files_chunks_and_sidecars() {
+    let d = tempdir().unwrap();
+    touch(
+        d.path(),
+        &[
+            "pak01_dir.vpk",
+            "pak01_000.vpk",
+            "pak02_dir.vpk.disabled",
+            "pak05_dir.vpk",
+        ],
+    );
+    sidecar::write(d.path(), &sc("a", &["pak01_dir.vpk"])).unwrap();
+    sidecar::write(d.path(), &sc("b", &["pak02_dir.vpk"])).unwrap();
+    sidecar::write(d.path(), &sc("c", &["pak05_dir.vpk"])).unwrap();
+    let mods = sidecar::group(d.path());
+    sidecar::move_mod(d.path(), &mods, 2, sidecar::Move::Top).unwrap();
+
+    assert_eq!(ids(d.path()), ["c", "a", "b"]);
+    // Numbers 1, 2, 5 are redistributed; the gap at 5 stays.
+    for f in [
+        "pak01_dir.vpk",
+        "pak02_dir.vpk",
+        "pak02_000.vpk",
+        "pak05_dir.vpk.disabled",
+    ] {
+        assert!(d.path().join(f).is_file(), "{f}");
+    }
+    assert_eq!(
+        fs::read(d.path().join("pak02_000.vpk")).unwrap(),
+        b"pak01_000.vpk"
+    );
+    assert_eq!(
+        fs::read(d.path().join("pak01_dir.vpk")).unwrap(),
+        b"pak05_dir.vpk"
+    );
+    assert!(!d.path().join("pak01_000.vpk").exists());
+    assert_eq!(
+        sidecar::read(d.path(), "c").unwrap().unwrap().vpks,
+        ["pak01_dir.vpk"]
+    );
+    assert_eq!(
+        sidecar::read(d.path(), "a").unwrap().unwrap().vpks,
+        ["pak02_dir.vpk"]
+    );
+    assert_eq!(
+        sidecar::read(d.path(), "b").unwrap().unwrap().vpks,
+        ["pak05_dir.vpk"]
+    );
+}
+
+#[test]
+fn move_up_and_down_swap_neighbours_and_stop_at_the_ends() {
+    let d = tempdir().unwrap();
+    touch(
+        d.path(),
+        &["pak01_dir.vpk", "pak02_dir.vpk", "pak03_dir.vpk"],
+    );
+    for (id, f) in [
+        ("a", "pak01_dir.vpk"),
+        ("b", "pak02_dir.vpk"),
+        ("c", "pak03_dir.vpk"),
+    ] {
+        sidecar::write(d.path(), &sc(id, &[f])).unwrap();
+    }
+    let mods = sidecar::group(d.path());
+    sidecar::move_mod(d.path(), &mods, 0, sidecar::Move::Up).unwrap();
+    assert_eq!(ids(d.path()), ["a", "b", "c"]);
+    sidecar::move_mod(d.path(), &mods, 0, sidecar::Move::Down).unwrap();
+    assert_eq!(ids(d.path()), ["b", "a", "c"]);
+    let mods = sidecar::group(d.path());
+    sidecar::move_mod(d.path(), &mods, 2, sidecar::Move::Down).unwrap();
+    assert_eq!(ids(d.path()), ["b", "a", "c"]);
+}
+
+#[test]
+fn move_to_places_a_mod_at_a_position_and_clamps() {
+    let d = tempdir().unwrap();
+    touch(
+        d.path(),
+        &["pak01_dir.vpk", "pak02_dir.vpk", "pak03_dir.vpk"],
+    );
+    for (id, f) in [
+        ("a", "pak01_dir.vpk"),
+        ("b", "pak02_dir.vpk"),
+        ("c", "pak03_dir.vpk"),
+    ] {
+        sidecar::write(d.path(), &sc(id, &[f])).unwrap();
+    }
+    let mods = sidecar::group(d.path());
+    sidecar::move_mod(d.path(), &mods, 0, sidecar::Move::To(1)).unwrap();
+    assert_eq!(ids(d.path()), ["b", "a", "c"]);
+    let mods = sidecar::group(d.path());
+    sidecar::move_mod(d.path(), &mods, 0, sidecar::Move::To(99)).unwrap();
+    assert_eq!(ids(d.path()), ["a", "c", "b"]);
+}
+
+#[test]
+fn move_fails_cleanly_when_a_file_is_gone() {
+    let d = tempdir().unwrap();
+    touch(d.path(), &["pak01_dir.vpk", "pak02_dir.vpk"]);
+    sidecar::write(d.path(), &sc("a", &["pak01_dir.vpk"])).unwrap();
+    sidecar::write(d.path(), &sc("b", &["pak02_dir.vpk"])).unwrap();
+    let mods = sidecar::group(d.path());
+    fs::remove_file(d.path().join("pak02_dir.vpk")).unwrap();
+    assert!(sidecar::move_mod(d.path(), &mods, 1, sidecar::Move::Top).is_err());
+    assert!(d.path().join("pak01_dir.vpk").is_file());
+    assert_eq!(
+        sidecar::read(d.path(), "a").unwrap().unwrap().vpks,
+        ["pak01_dir.vpk"]
+    );
+}
