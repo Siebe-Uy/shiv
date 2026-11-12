@@ -88,8 +88,9 @@ Download from the [latest release](https://github.com/Siebe-Uy/shiv/releases/lat
   menu entry and an uninstaller.
 - `Shiv-<version>-x64-portable.exe`: a single file, no install. Run it from anywhere.
 
-The files are not code-signed yet, so Windows SmartScreen may warn you: choose
-**More info**, then **Run anyway**.
+The files are not code-signed, so Windows SmartScreen may warn you: choose
+**More info**, then **Run anyway**. Each file has a `.sha256` next to it on the release page
+if you want to verify the download (`certutil -hashfile <file> SHA256` on Windows).
 
 ## Build from source
 
@@ -135,22 +136,6 @@ and bundle code under their own licenses (see `LICENSE-ValveResourceFormat` and
 `LICENSE-vpkmerge` in `crates/`).
 
 Shiv is not affiliated with Valve.
-
-## Code signing policy
-
-Windows releases are signed with a certificate from the
-[SignPath Foundation](https://signpath.org/), through
-[SignPath.io](https://signpath.io/), which provides free code signing for open-source projects.
-
-- **What is signed:** only the Windows files built from this repository's tagged
-  releases by the public GitHub Actions workflow (`.github/workflows/release.yml`).
-  Nothing is signed from a developer's machine.
-- **Roles:** [Siebe-Uy](https://github.com/Siebe-Uy) is the committer, reviewer and approver
-  of every signing request.
-- **Privacy:** Shiv has no telemetry and sends no personal data. It only
-  fetches mod data and images from the [Deadlock Mods](https://deadlockmods.app) API,
-  GameBanana and their image hosts, and downloads the mods you choose to install.
-  It never uploads anything about you or your files.
 
 ## License
 
