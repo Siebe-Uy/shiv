@@ -36,6 +36,9 @@ export global LaunchState {
     callback launch-vanilla();
     // Only where the game process can be watched, so mods can be turned back on.
     in property <bool> can-launch-vanilla: false;
+    // Findings include a missing `Game citadel/addons` mount Shiv can add.
+    in property <bool> can-fix-mount;
+    callback fix-mount();
     callback launch-anyway();
     // Stop waiting for the game to start.
     callback cancel-launch();
@@ -248,6 +251,10 @@ export component LaunchDialog inherits Rectangle {
                 Button {
                     text: "Cancel";
                     clicked => { LaunchState.cancel(); }
+                }
+                if LaunchState.can-fix-mount: Button {
+                    text: "Fix mount";
+                    clicked => { LaunchState.fix-mount(); }
                 }
                 Button {
                     text: "Launch anyway";

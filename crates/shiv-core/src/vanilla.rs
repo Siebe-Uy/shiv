@@ -85,7 +85,7 @@ pub fn restore(paths: &GamePaths) -> io::Result<()> {
 }
 
 /// Replace `path` through a temp file so a crash never leaves it half-written.
-fn write_replace(path: &Path, text: &str) -> io::Result<()> {
+pub(crate) fn write_replace(path: &Path, text: &str) -> io::Result<()> {
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".shiv-tmp");
     let tmp = PathBuf::from(tmp);

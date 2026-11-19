@@ -376,7 +376,7 @@ fn check_gameinfo(gameinfo: &Path, findings: &mut Vec<Finding>) {
 
 /// True when `GameInfo/FileSystem/SearchPaths` holds a `Game` (or `Game+...`)
 /// entry for `citadel/addons` that applies to the Windows client.
-fn mounts_addons(text: &str) -> Result<bool, kv_parser::KvError> {
+pub(crate) fn mounts_addons(text: &str) -> Result<bool, kv_parser::KvError> {
     // Source 2 reads backslashes literally in gameinfo.gi.
     let doc = SourceDocument::parse(
         text,

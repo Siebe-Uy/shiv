@@ -37,6 +37,8 @@ pub(crate) type Launcher =
 pub(crate) type Running = Arc<dyn Fn() -> bool + Send + Sync>;
 /// Turns the mod mounts off (`true`) or restores them (`false`).
 pub(crate) type Vanilla = Arc<dyn Fn(&GamePaths, bool) -> std::io::Result<()> + Send + Sync>;
+/// Mounts `citadel/addons` in `gameinfo.gi`; `false` when it already was.
+pub(crate) type FixMount = Arc<dyn Fn(&GamePaths) -> std::io::Result<bool> + Send + Sync>;
 
 /// Injectable so tests never touch the real install or start Steam.
 #[derive(Clone)]
@@ -47,6 +49,7 @@ pub(crate) struct Deps {
     /// Whether a Deadlock process exists.
     pub running: Running,
     pub vanilla: Vanilla,
+    pub fix_mount: FixMount,
     /// Whether `running` can know (process scanning exists on this
     /// platform). Without it, Launch only sends the request.
     pub can_detect: bool,
@@ -70,6 +73,7 @@ impl Deps {
                     shiv_core::vanilla::restore(paths)
                 }
             }),
+            fix_mount: Arc::new(shiv_core::mount::fix_addons_mount),
             can_detect: shiv_core::game::can_detect(),
             poll: Duration::from_secs(1),
             // Steam may update the game or process shaders before it starts.
@@ -275,6 +279,7 @@ pub(crate) fn attach_with(app: &App, deps: Deps) {
     state.on_launch_vanilla(|| with_launch(|l| l.launch_vanilla_clicked()));
     state.set_can_launch_vanilla(can_detect);
     state.on_launch_anyway(|| with_launch(|l| l.launch_anyway()));
+    state.on_fix_mount(|| with_launch(|l| l.fix_mount()));
     state.on_cancel_launch(|| with_launch(|l| l.cancel_launch()));
     state.on_cancel(|| with_launch(|l| l.with_state(|s| s.set_dialog_open(false))));
     state.on_review(|| {
@@ -559,6 +564,11 @@ impl Launch {
         self.with_state(|s| {
             s.set_busy(false);
             s.set_repair_stale(stale);
+            s.set_can_fix_mount(
+                findings
+                    .iter()
+                    .any(|f| f.kind == FindingKind::MissingSearchPath),
+            );
             s.set_problems_text(problems_text(problems).into());
             s.set_problems_short(problems_short(problems).into());
             if self.status_from_check.replace(false) {
@@ -602,6 +612,47 @@ impl Launch {
         } else {
             self.fresh_dialog.set(true);
             self.with_state(|s| s.set_dialog_open(true));
+        }
+    }
+
+    /// Add the missing addons mount, then re-check so the dialog follows the file.
+    fn fix_mount(&self) {
+        if self.busy() {
+            return;
+        }
+        let Some((paths, _, _)) = self.last.borrow().clone() else {
+            return;
+        };
+        self.with_state(|s| {
+            s.set_busy(true);
+            s.set_busy_text("Fixing gameinfo.gi".into());
+        });
+        let deps = self.deps.clone();
+        let weak = self.weak.clone();
+        let started = crate::spawn_worker(
+            "shiv-fix-mount",
+            move || {
+                if deps.can_detect && (deps.running)() {
+                    return Err("Close Deadlock before changing gameinfo.gi.".to_owned());
+                }
+                (deps.fix_mount)(&paths).map_err(|e| format!("Could not fix gameinfo.gi: {e}."))
+            },
+            move |result| {
+                let result = result.and_then(|r| r);
+                let _ = weak.upgrade_in_event_loop(move |_| {
+                    with_launch(|l| {
+                        l.with_state(|s| s.set_busy(false));
+                        l.check(Purpose::Background);
+                        if let Err(text) = result {
+                            l.status_from_check.set(false);
+                            l.finish(Err(text));
+                        }
+                    });
+                });
+            },
+        );
+        if !started {
+            self.finish(Err("Could not start a background thread.".into()));
         }
     }
 

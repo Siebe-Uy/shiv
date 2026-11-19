@@ -545,6 +545,7 @@ mod tests {
                 }),
                 running: Arc::new(|| false),
                 vanilla: Arc::new(|_, _| Ok(())),
+                fix_mount: Arc::new(shiv_core::mount::fix_addons_mount),
                 can_detect: true,
                 poll: Duration::from_millis(10),
                 timeout: Duration::from_secs(5),
@@ -1139,6 +1140,7 @@ mod tests {
                     vanilla_in.lock().unwrap().push(on);
                     Ok(())
                 }),
+                fix_mount: Arc::new(shiv_core::mount::fix_addons_mount),
                 can_detect: true,
                 poll: Duration::from_millis(10),
                 timeout: Duration::from_millis(1500),
@@ -1341,6 +1343,7 @@ mod tests {
                 }),
                 running: Arc::new(|| panic!("process scanning is unavailable")),
                 vanilla: Arc::new(|_, _| Ok(())),
+                fix_mount: Arc::new(shiv_core::mount::fix_addons_mount),
                 can_detect: false,
                 poll: Duration::from_millis(10),
                 timeout: Duration::from_millis(200),
