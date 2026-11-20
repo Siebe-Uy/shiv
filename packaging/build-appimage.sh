@@ -18,9 +18,15 @@ rsvg-convert -w 256 -h 256 "$root/style/svg/shiv-icon.svg" -o "$work/shiv.png"
 
 mkdir -p "$root/dist"
 cd "$work"
+# winit loads libxkbcommon and libxkbcommon-x11 with dlopen at startup, so
+# linuxdeploy cannot see them as dependencies; bundle them explicitly or the
+# app panics on systems that lack the X11 one.
+libdir="$(dirname "$(ldconfig -p | awk '/libxkbcommon\.so\.0 /{print $NF; exit}')")"
 ARCH=x86_64 LINUXDEPLOY_OUTPUT_VERSION="$version" \
   linuxdeploy --appdir AppDir \
     --executable "$root/target/release/shiv" \
+    --library "$libdir/libxkbcommon.so.0" \
+    --library "$libdir/libxkbcommon-x11.so.0" \
     --desktop-file "$root/packaging/shiv.desktop" \
     --icon-file "$work/shiv.png" \
     --output appimage

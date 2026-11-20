@@ -2,8 +2,11 @@
 //!
 //! Valve's stock `gameinfo.gi` does not mount `citadel/addons`, so a game
 //! update that rewrites the file turns every mod off. [`fix_addons_mount`]
-//! inserts the one missing line directly before the stock `Game citadel` entry
-//! (so mods win over base files) and changes nothing else.
+//! inserts the `Game citadel/addons` line directly before the stock
+//! `Game citadel` entry (so mods win over base files), plus `Mod citadel` and
+//! `Write citadel`. Without those two, the engine takes the first `Game` path
+//! (the addons folder) as its `MOD` and write path, can no longer find
+//! `cfg/user_keys_default.vcfg`, and aborts at launch. Nothing else changes.
 
 use std::fs;
 use std::io;
@@ -68,17 +71,22 @@ pub fn with_addons_mount(text: &str) -> io::Result<Option<String>> {
     if indent.chars().all(char::is_whitespace) {
         let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
         out.push_str(&text[..start]);
-        out.push_str(indent);
-        out.push_str("Game                ");
-        out.push_str(ADDONS_SEARCH_PATH);
-        out.push_str(newline);
+        for (key, path) in [
+            ("Game", ADDONS_SEARCH_PATH),
+            ("Mod", "citadel"),
+            ("Write", "citadel"),
+        ] {
+            out.push_str(indent);
+            out.push_str(&format!("{key:<20}{path}"));
+            out.push_str(newline);
+        }
         out.push_str(&text[start..]);
     } else {
         // The entry shares its line with other tokens.
         out.push_str(&text[..key_start]);
         out.push_str("Game ");
         out.push_str(ADDONS_SEARCH_PATH);
-        out.push(' ');
+        out.push_str(" Mod citadel Write citadel ");
         out.push_str(&text[key_start..]);
     }
     Ok(Some(out))
@@ -114,7 +122,7 @@ mod tests {
             out,
             STOCK.replace(
                 "\t\t\tGame\t\t\t\tcitadel\r\n",
-                "\t\t\tGame                citadel/addons\r\n\t\t\tGame\t\t\t\tcitadel\r\n"
+                "\t\t\tGame                citadel/addons\r\n\t\t\tMod                 citadel\r\n\t\t\tWrite               citadel\r\n\t\t\tGame\t\t\t\tcitadel\r\n"
             )
         );
         assert_eq!(with_addons_mount(&out).unwrap(), None);
@@ -125,7 +133,7 @@ mod tests {
         let one = "GameInfo { FileSystem { SearchPaths { Game citadel Game core } } }";
         assert_eq!(
             with_addons_mount(one).unwrap().unwrap(),
-            "GameInfo { FileSystem { SearchPaths { Game citadel/addons Game citadel Game core } } }"
+            "GameInfo { FileSystem { SearchPaths { Game citadel/addons Mod citadel Write citadel Game citadel Game core } } }"
         );
         let conditional =
             "GameInfo { FileSystem { SearchPaths { Game citadel [!$WIN64]\n Game core } } }";
